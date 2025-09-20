@@ -1,0 +1,36 @@
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+*.venv
+env/
+venv/
+
+# -------------------------
+# Jupyter
+# -------------------------
+.ipynb_checkpoints/
+
+# -------------------------
+# Data / Output
+# -------------------------
+# Raw CSV se vuoi non versionarli
+data/raw/
+# Processed files: parquet e modelli
+data/processed/*.parquet
+data/processed/*.joblib
+
+# Logs
+*.log
+
+# -------------------------
+# IDE / OS
+# -------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
