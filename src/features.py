@@ -1,112 +1,86 @@
-# src/features.py
-
 from pathlib import Path
 import pandas as pd
 
-# -------------------------
-# 1️⃣ Setup cartelle e file
-# -------------------------
 root_dir = Path(__file__).parent.parent
 processed_dir = root_dir / 'data' / 'processed'
-raw_dir = root_dir / 'data' / 'raw'
 
 laps_path = processed_dir / 'laps_processed.parquet'
-pit_stops_path = processed_dir / 'pit_stops.parquet'  # ora parquet
+pit_stops_path = processed_dir / 'pit_stops.parquet'
 
-# CSV storici
-races_path = raw_dir / 'races.csv'
-results_path = raw_dir / 'results.csv'
-status_path = raw_dir / 'status.csv'
-circuits_path = raw_dir / 'circuits.csv'
-drivers_path = raw_dir / 'drivers.csv'
-
-# -------------------------
-# 2️⃣ Carica dati
-# -------------------------
+# Carica
 laps_df = pd.read_parquet(laps_path)
 pit_df = pd.read_parquet(pit_stops_path)
 
-races_df = pd.read_csv(races_path)
-results_df = pd.read_csv(results_path)
-status_df = pd.read_csv(status_path)
-circuits_df = pd.read_csv(circuits_path)
+# Mappa driverId -> codice (se servisse)
+drivers_path = root_dir / 'data' / 'raw' / 'drivers.csv'
 drivers_df = pd.read_csv(drivers_path)
-
-# -------------------------
-# 3️⃣ Dizionario driverId -> sigla FastF1
-# -------------------------
 piloti_f1 = drivers_df[['driverId', 'code']].dropna(subset=['code'])
 DRIVER_MAP = dict(zip(piloti_f1['driverId'], piloti_f1['code']))
 
-# -------------------------
-# 4️⃣ Funzione per aggiungere feature
-# -------------------------
 def add_features(df: pd.DataFrame, pit_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Aggiunge feature chiave per il modello:
-    - Stint corretto
-    - TyreAge
-    - DegradationRate
-    - IsOutLap
-    - RollingAvgLap
+    Crea Stint, TyreAge, IsOutLap, DegradationRate, RollingAvgLap (senza leakage)
+    e LapDelta (target): LapTimeSeconds - best lap del driver nella stessa gara (RaceId).
     """
-    # 1️⃣ Calcola Stint corretto
+    # mappa pit laps per driverId
     pit_laps_map = pit_df.groupby('driverId')['lap'].apply(list).to_dict()
 
+    # costruisco Stint usando driverId quando possibile
     def get_stint(row):
-        driver = row['Driver']
-        lap = row['LapNumber']
-        driver_ids = [k for k, v in DRIVER_MAP.items() if v == driver]
-        if not driver_ids:
-            return 1
-        driver_id = driver_ids[0]
-        pit_laps = sorted(pit_laps_map.get(driver_id, []))
+        driver_id = row.get('driverId', None)
+        if pd.isna(driver_id):
+            # try mapping by code
+            codes = [k for k, v in DRIVER_MAP.items() if v == row.get('Driver')]
+            driver_id = codes[0] if codes else None
+        pit_laps = sorted(pit_laps_map.get(driver_id, [])) if driver_id is not None else []
         stint = 1
         for p in pit_laps:
-            if lap > p:
+            if row['LapNumber'] > p:
                 stint += 1
         return stint
 
+    df = df.copy()
     df['Stint'] = df.apply(get_stint, axis=1)
 
-    # 2️⃣ TyreAge: numero di giri nello stesso stint
+    # TyreAge: numero di giro nello stesso stint (0-based)
     df['TyreAge'] = df.groupby(['Driver', 'Stint']).cumcount()
 
-    # 3️⃣ IsOutLap: True se giro subito dopo un pit stop
+    # IsOutLap: True se il giro è subito dopo un pit
     def is_out_lap(row):
-        driver = row['Driver']
-        lap = row['LapNumber']
-        driver_ids = [k for k, v in DRIVER_MAP.items() if v == driver]
-        if not driver_ids:
-            return False
-        driver_id = driver_ids[0]
-        pit_laps = pit_laps_map.get(driver_id, [])
-        return (lap - 1) in pit_laps
+        driver_id = row.get('driverId', None)
+        if pd.isna(driver_id):
+            codes = [k for k, v in DRIVER_MAP.items() if v == row.get('Driver')]
+            driver_id = codes[0] if codes else None
+        pit_laps = pit_laps_map.get(driver_id, []) if driver_id is not None else []
+        return (row['LapNumber'] - 1) in pit_laps
 
     df['IsOutLap'] = df.apply(is_out_lap, axis=1)
 
-    # 4️⃣ DegradationRate: differenza col giro precedente nello stesso stint
+    # DegradationRate: differenza rispetto al giro precedente nello stesso stint
     df['DegradationRate'] = df.groupby(['Driver', 'Stint'])['LapTimeSeconds'].diff().fillna(0)
 
-    # 5️⃣ Rolling average ultimi 3 giri
+    # RollingAvgLap: media ultimi 3 giri **precedenti** al giro corrente (shift)
     df['RollingAvgLap'] = df.groupby('Driver')['LapTimeSeconds'].transform(
-        lambda x: x.rolling(3, min_periods=1).mean()
+        lambda x: x.shift(1).rolling(3, min_periods=1).mean()
     )
 
-    # 6️⃣ Compound placeholder se non c'è
+    # Compound fallback
     if 'Compound' not in df.columns:
-        df['Compound'] = 'Soft'
+        df['Compound'] = 'Unknown'
+
+    # LapDelta: rispetto al best lap dello stesso pilota nella stessa gara (RaceId)
+    if 'RaceId' in df.columns:
+        df['MinLapByDriverRace'] = df.groupby(['Driver', 'RaceId'])['LapTimeSeconds'].transform('min')
+    else:
+        # se manca RaceId, fallback a best driver in tutto il dataset (meno ideale)
+        df['MinLapByDriverRace'] = df.groupby('Driver')['LapTimeSeconds'].transform('min')
+
+    df['LapDelta'] = df['LapTimeSeconds'] - df['MinLapByDriverRace']
 
     return df
 
-# -------------------------
-# 5️⃣ Applica features
-# -------------------------
+# applica e salva
 laps_features = add_features(laps_df, pit_df)
-
-# -------------------------
-# 6️⃣ Salva nuovo Parquet pronto per il modello
-# -------------------------
 output_path = processed_dir / 'laps_features.parquet'
 laps_features.to_parquet(output_path, index=False)
-print(f"✅ Dataset con feature salvato in {output_path}")
+print(f"✅ Dataset con feature e LapDelta salvato in {output_path}")

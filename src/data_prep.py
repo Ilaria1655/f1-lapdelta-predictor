@@ -1,5 +1,3 @@
-# src/data_prep.py
-
 from pathlib import Path
 import fastf1 as ff1
 import pandas as pd
@@ -10,16 +8,10 @@ import pandas as pd
 drivers_path = Path(__file__).parent.parent / 'data' / 'raw' / 'drivers.csv'
 drivers_df = pd.read_csv(drivers_path)
 
-# Prendi solo driver con codice valido
 piloti_f1 = drivers_df[['driverId', 'code', 'forename', 'surname']].dropna(subset=['code'])
 
-# Dizionario driverId -> sigla FastF1
 DRIVER_MAP = dict(zip(piloti_f1['driverId'], piloti_f1['code']))
-
-# Dizionario driverId -> nome completo
 DRIVER_NAME_MAP = dict(zip(piloti_f1['driverId'], piloti_f1['forename'] + " " + piloti_f1['surname']))
-
-# Lista sigle valide per filtrare FastF1
 VALID_DRIVER_CODES = set(DRIVER_MAP.values())
 
 # -------------------------
@@ -38,36 +30,38 @@ processed_dir.mkdir(parents=True, exist_ok=True)
 # 3️⃣ Funzioni
 # -------------------------
 def load_fastf1_laps(year: int, gp: str, session: str = 'R') -> pd.DataFrame:
-    """Carica laps da FastF1 per una gara."""
+    """
+    Scarica sessione FastF1 (usa cache se presente) e ritorna laps con LapTimeSeconds.
+    """
     sess = ff1.get_session(year, gp, session)
     sess.load()
     laps = sess.laps.reset_index()
-    # FastF1 ha già Driver come sigla
     laps['LapTimeSeconds'] = laps['LapTime'].dt.total_seconds()
     return laps
 
 
 def merge_kaggle_with_fastf1(kaggle_path: str, laps: pd.DataFrame, races_parquet: str, gp_name: str) -> pd.DataFrame:
-    """Merge dei dati FastF1 con il CSV Kaggle e assegna RaceId."""
+    """
+    Merge dei dati FastF1 con il CSV Kaggle e assegna RaceId (basato su races.parquet).
+    Il CSV Kaggle deve contenere 'driverId' (numerico) e 'lap' (numero giro).
+    Dopo il merge la tabella contiene driverId (numerico) e Driver (sigla).
+    """
     kaggle = pd.read_csv(kaggle_path)
-
-    # Aggiungi colonna Driver usando il dizionario driverId -> code
     kaggle['Driver'] = kaggle['driverId'].map(DRIVER_MAP)
 
-    # Filtra solo piloti presenti in FastF1
+    # Filtri su driver validi
     laps_filtered = laps[laps['Driver'].isin(VALID_DRIVER_CODES)]
     kaggle_filtered = kaggle[kaggle['Driver'].isin(VALID_DRIVER_CODES)]
 
-    # Merge su Driver e LapNumber / lap
     merged = pd.merge(
         laps_filtered,
         kaggle_filtered,
         left_on=['Driver', 'LapNumber'],
         right_on=['Driver', 'lap'],
-        how='inner'
+        how='inner',
+        suffixes=('_ff1', '_kaggle')
     )
 
-    # Aggiungi RaceId basato sul nome della gara
     races_df = pd.read_parquet(races_parquet)
     race_match = races_df[races_df['name'] == gp_name]
     if race_match.empty:
@@ -81,7 +75,10 @@ def merge_kaggle_with_fastf1(kaggle_path: str, laps: pd.DataFrame, races_parquet
 
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Aggiunge colonne utili per il modello, converte 'time' in secondi e sostituisce NaN con la mediana."""
+    """
+    Funzione di comodità per convertire colonne 'time' (se esistono) e assicurare LapTimeSeconds.
+    Non fa feature complesse: le feature avanzate sono in src/features.py
+    """
     if 'time' in df.columns:
         def time_to_seconds(t):
             try:
@@ -92,26 +89,21 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
             except:
                 return None
         df['LapTimeSeconds'] = df['time'].apply(time_to_seconds)
-    else:
-        df['LapTimeSeconds'] = 90.0  # placeholder
 
-    median_time = df['LapTimeSeconds'].median()
-    df['LapTimeSeconds'] = df['LapTimeSeconds'].fillna(median_time)
+    # fallback / placeholder
+    df['LapTimeSeconds'] = df.get('LapTimeSeconds', pd.Series()).fillna(df['LapTimeSeconds'].median() if 'LapTimeSeconds' in df.columns else 90.0)
 
-    # Rolling average ultimi 3 giri
-    df['RollingAvgLap'] = df['LapTimeSeconds'].rolling(3, min_periods=1).mean()
-
-    # Colonna Compound placeholder
     if 'Compound' not in df.columns:
-        df['Compound'] = 'Soft'
+        df['Compound'] = 'Unknown'
 
     return df
+
 
 def save_processed(df: pd.DataFrame, path: Path):
     df.to_parquet(path, index=False)
 
+
 def save_pit_stops():
-    """Converte pit_stops.csv in pit_stops.parquet"""
     pit_csv_path = raw_dir / "pit_stops.csv"
     if pit_csv_path.exists():
         pit_df = pd.read_csv(pit_csv_path)
@@ -121,8 +113,8 @@ def save_pit_stops():
     else:
         print("⚠️ pit_stops.csv non trovato in raw/")
 
+
 def save_csv_as_parquet(csv_name: str, parquet_name: str, map_dict=None):
-    """Legge CSV e lo salva come Parquet, applicando mappature opzionali."""
     csv_path = raw_dir / csv_name
     output_path = processed_dir / parquet_name
     if csv_path.exists():
@@ -135,6 +127,7 @@ def save_csv_as_parquet(csv_name: str, parquet_name: str, map_dict=None):
     else:
         print(f"⚠️ {csv_name} non trovato in raw/")
 
+
 def save_all_csvs():
     save_csv_as_parquet("races.csv", "races.parquet")
     save_csv_as_parquet("circuits.csv", "circuits.parquet")
@@ -142,12 +135,18 @@ def save_all_csvs():
     save_csv_as_parquet("drivers.csv", "drivers.parquet", map_dict={"driverId": DRIVER_MAP})
     save_csv_as_parquet("results.csv", "results.parquet", map_dict={"driverId": DRIVER_MAP})
 
+
 # -------------------------
-# 4️⃣ Esecuzione
+# 4️⃣ Esecuzione se lanciato come script
 # -------------------------
 if __name__ == "__main__":
-    print("Caricamento dati FastF1 Monza 2023...")
-    laps_fastf1 = load_fastf1_laps(2023, 'Monza', 'R')
+    print("Eseguo data_prep: attenzione, questo script prova a scaricare la sessione FastF1 impostata al suo interno.")
+    # esempio predefinito: Monza 2023 finale
+    try:
+        laps_fastf1 = load_fastf1_laps(2023, 'Monza', 'R')
+    except Exception as ex:
+        print("⚠️ Errore FastF1 (forse mancano i dati in cache):", ex)
+        laps_fastf1 = pd.DataFrame()  # si continua se user vuole usare solo i CSV
 
     kaggle_csv_path = raw_dir / 'lap_times.csv'
     races_parquet_path = processed_dir / "races.parquet"
@@ -155,14 +154,14 @@ if __name__ == "__main__":
     if not kaggle_csv_path.exists():
         print(f"⚠️ File {kaggle_csv_path} non trovato. Mettilo in data/raw/")
     else:
-        merged = merge_kaggle_with_fastf1(kaggle_csv_path, laps_fastf1, races_parquet_path, gp_name='Italian Grand Prix')
-
-        print(merged[['Driver', 'LapNumber', 'LapTimeSeconds', 'RaceId']].head())
-
-        merged = add_features(merged)
-        output_path = processed_dir / 'laps_processed.parquet'
-        save_processed(merged, output_path)
-        print(f"✅ Dataset preprocessato salvato in {output_path}")
+        if laps_fastf1.empty:
+            print("⚠️ FastF1 laps vuoto: il merge non verrà eseguito. Puoi usare direttamente i CSV Kaggle.")
+        else:
+            merged = merge_kaggle_with_fastf1(kaggle_csv_path, laps_fastf1, races_parquet_path, gp_name='Italian Grand Prix')
+            merged = add_features(merged)
+            output_path = processed_dir / 'laps_processed.parquet'
+            save_processed(merged, output_path)
+            print(f"✅ Dataset preprocessato salvato in {output_path}")
 
     save_pit_stops()
     save_all_csvs()
