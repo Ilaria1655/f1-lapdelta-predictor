@@ -3,7 +3,7 @@ import pandas as pd
 import joblib
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -25,31 +25,45 @@ report_path = output_dir / "report_analysis.pdf"
 df = pd.read_parquet(laps_path)
 model = joblib.load(model_path)
 
-NUM_COLS = ['LapNumber', 'RollingAvgLap', 'TyreAge', 'DegradationRate']
-CAT_COLS = ['Driver', 'Compound']
+NUM_COLS = ['LapNumber', 'RollingAvgLap', 'TyreAge', 'DegradationRate', 'Stint']
+CAT_COLS = ['Driver', 'Compound', 'CircuitId', 'IsOutLap']
 TARGET = 'LapDelta'
+
+# colonne mancanti
+for col in NUM_COLS:
+    if col not in df.columns:
+        df[col] = 0.0
+for col in CAT_COLS:
+    if col not in df.columns:
+        df[col] = 'Unknown'
+
+# converti booleani in stringhe per OneHotEncoder
+if 'IsOutLap' in df.columns:
+    df['IsOutLap'] = df['IsOutLap'].astype(str)
 
 X = df[NUM_COLS + CAT_COLS]
 y_true = df[TARGET]
 y_pred = model.predict(X)
 
 # -----------------------
-# Metriche
+# Metriche globali
 # -----------------------
-mae = mean_absolute_error(y_true, y_pred)
-rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-r2 = r2_score(y_true, y_pred)
+errors = y_pred - y_true
+df['Error'] = errors
 
-print("\n📊 Metriche valutazione:")
-print(f"   MAE  : {mae:.3f} sec")
-print(f"   RMSE : {rmse:.3f} sec")
-print(f"   R²   : {r2:.3f}")
+mae_global = np.mean(np.abs(errors))
+rmse_global = np.sqrt(np.mean(errors**2))
 
-# set style
+print(f"\n📊 Metriche valutazione globale:")
+print(f"   MAE  : {mae_global:.3f} sec")
+print(f"   RMSE : {rmse_global:.3f} sec")
+
+# -----------------------
+# Grafici e PDF report
+# -----------------------
 sns.set(style="whitegrid")
 plt.rcParams.update({'figure.max_open_warning': 0})
 
-# inizializza PDF multipagina
 with PdfPages(report_path) as pdf:
     # Pred vs Real
     fig, ax = plt.subplots(figsize=(6,6))
@@ -65,7 +79,6 @@ with PdfPages(report_path) as pdf:
     plt.close(fig)
 
     # Distribuzione errori
-    errors = y_pred - y_true
     fig, ax = plt.subplots(figsize=(8,4))
     sns.histplot(errors, bins=60, kde=True, ax=ax)
     ax.axvline(0, color="red", linestyle="--")
@@ -75,24 +88,70 @@ with PdfPages(report_path) as pdf:
     pdf.savefig(fig)
     plt.close(fig)
 
-    # Boxplot per driver (solo top N per leggibilità)
-    top_drivers = df['Driver'].value_counts().index[:20].tolist()
-    df_eval = df.copy()
-    df_eval["Error"] = errors
+    # Boxplot driver
+    top_drivers = df['Driver'].value_counts().index[:20]
     fig, ax = plt.subplots(figsize=(12,6))
-    sns.boxplot(x="Driver", y="Error", data=df_eval[df_eval['Driver'].isin(top_drivers)], ax=ax)
+    sns.boxplot(x="Driver", y="Error", data=df[df['Driver'].isin(top_drivers)], ax=ax)
     ax.axhline(0, color="red", linestyle="--")
-    ax.set_title("Distribuzione errore per pilota (top 20 per numero di giri)")
+    ax.set_title("Distribuzione errore per pilota (top 20)")
     plt.xticks(rotation=90)
     plt.tight_layout()
     pdf.savefig(fig)
     plt.close(fig)
 
-    # Feature importance (se LightGBM presente nella pipeline)
+    # Boxplot circuito
+    top_circuits = df['CircuitId'].value_counts().index[:20]
+    fig, ax = plt.subplots(figsize=(12,6))
+    sns.boxplot(x="CircuitId", y="Error", data=df[df['CircuitId'].isin(top_circuits)], ax=ax)
+    ax.axhline(0, color="red", linestyle="--")
+    ax.set_title("Distribuzione errore per circuito (top 20)")
+    plt.xticks(rotation=90)
+    plt.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+
+    # Ranking driver per MAE
+    driver_stats = df.groupby('Driver').agg(
+        MAE=('Error', lambda x: np.mean(np.abs(x))),
+        RMSE=('Error', lambda x: np.sqrt(np.mean(x**2))),
+        N=('Error', 'count')
+    ).sort_values(by='MAE')
+    fig, ax = plt.subplots(figsize=(12,8))
+    ax.axis('tight')
+    ax.axis('off')
+    table = ax.table(cellText=driver_stats.reset_index().values,
+                     colLabels=driver_stats.reset_index().columns,
+                     loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.2, 1.2)
+    ax.set_title("Tabella driver: MAE, RMSE, numero giri")
+    pdf.savefig(fig)
+    plt.close(fig)
+
+    # Ranking circuiti per MAE
+    circuit_stats = df.groupby('CircuitId').agg(
+        MAE=('Error', lambda x: np.mean(np.abs(x))),
+        RMSE=('Error', lambda x: np.sqrt(np.mean(x**2))),
+        N=('Error', 'count')
+    ).sort_values(by='MAE')
+    fig, ax = plt.subplots(figsize=(12,8))
+    ax.axis('tight')
+    ax.axis('off')
+    table = ax.table(cellText=circuit_stats.reset_index().values,
+                     colLabels=circuit_stats.reset_index().columns,
+                     loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.2, 1.2)
+    ax.set_title("Tabella circuiti: MAE, RMSE, numero giri")
+    pdf.savefig(fig)
+    plt.close(fig)
+
+    # Feature importance
     try:
         model_lgbm = model.named_steps['model']
         importances = model_lgbm.feature_importances_
-        # prova a estrarre nomi dalle trasformazioni
         preproc = model.named_steps['preproc']
         num_features = NUM_COLS
         cat_pipe = preproc.named_transformers_['cat']
@@ -100,7 +159,7 @@ with PdfPages(report_path) as pdf:
         try:
             cat_features = list(ohe.get_feature_names_out(CAT_COLS))
         except Exception:
-            cat_features = []  # fallback
+            cat_features = []
         feature_names = num_features + cat_features
         feat_imp = pd.DataFrame({"Feature": feature_names, "Importance": importances[:len(feature_names)]})
         feat_imp = feat_imp.sort_values(by="Importance", ascending=False)
@@ -113,18 +172,4 @@ with PdfPages(report_path) as pdf:
     except Exception as e:
         print("⚠️ Impossibile ottenere feature importance:", e)
 
-    # SHAP summary (opzionale, se shap installato e piccolo sample)
-    try:
-        import shap
-        # usa solo un campione per velocità
-        X_sample = X.sample(min(2000, len(X)), random_state=42)
-        explainer = shap.Explainer(model_lgbm)
-        shap_vals = explainer(X_sample.iloc[:, :len(NUM_COLS)])  # potrebbe variare con pipeline; try/except safe-guard
-        fig = shap.plots.beeswarm(shap_vals, show=False)
-        # shap.plots returns a matplotlib figure only in some versions; fallback
-        pdf.savefig(bbox_inches='tight')
-        plt.close('all')
-    except Exception:
-        pass
-
-print(f"✅ Grafici salvati in {output_dir} e report PDF in {report_path}")
+print(f"✅ Analisi completata. Report PDF salvato in {report_path}")

@@ -6,8 +6,12 @@ import numpy as np
 
 def evaluate_model(df: pd.DataFrame, model_path=None):
     """
-    Valuta modello LapDelta su df che deve avere le colonne numeriche/categoriche usate per il model.
+    Valuta modello LapDelta su df.
+    df deve avere le colonne numeriche/categoriche usate nel modello.
     """
+    # -------------------------
+    # Caricamento modello
+    # -------------------------
     if model_path is None:
         processed_dir = Path(__file__).parent.parent / "data" / "processed"
         model_path = processed_dir / "lapdelta_model.joblib"
@@ -15,17 +19,36 @@ def evaluate_model(df: pd.DataFrame, model_path=None):
     model = joblib.load(model_path)
     print(f"✅ Modello caricato da {model_path}")
 
-    NUM_COLS = ['LapNumber', 'RollingAvgLap', 'TyreAge', 'DegradationRate']
-    CAT_COLS = ['Driver', 'Compound']
+    # -------------------------
+    # Colonne usate dal modello
+    # -------------------------
+    NUM_COLS = ['LapNumber', 'RollingAvgLap', 'TyreAge', 'DegradationRate', 'Stint']
+    CAT_COLS = ['Driver', 'Compound', 'CircuitId', 'IsOutLap']
     TARGET = 'LapDelta'
 
+    # -------------------------
+    # Gestione colonne mancanti
+    # -------------------------
+    for col in NUM_COLS:
+        if col not in df.columns:
+            df[col] = 0.0  # default numerico
     for col in CAT_COLS:
         if col not in df.columns:
-            df[col] = 'Unknown'
+            df[col] = 'Unknown'  # default categoriale
 
+    # converti boolean in stringa per OneHotEncoder
+    if 'IsOutLap' in df.columns:
+        df['IsOutLap'] = df['IsOutLap'].astype(str)
+
+    # -------------------------
+    # Preparazione dati
+    # -------------------------
     X = df[NUM_COLS + CAT_COLS]
     y_true = df[TARGET]
 
+    # -------------------------
+    # Predizione e metriche
+    # -------------------------
     y_pred = model.predict(X)
 
     mae = mean_absolute_error(y_true, y_pred)
@@ -37,8 +60,12 @@ def evaluate_model(df: pd.DataFrame, model_path=None):
     print(f"   RMSE : {rmse:.3f} sec")
     print(f"   R²   : {r2:.3f}")
 
+    # -------------------------
+    # Prime 10 predizioni
+    # -------------------------
     sample = pd.DataFrame({
         "Driver": df.get("Driver"),
+        "CircuitId": df.get("CircuitId"),
         "LapNumber": df.get("LapNumber"),
         "LapDelta_Real": y_true,
         "LapDelta_Pred": y_pred
@@ -51,6 +78,11 @@ if __name__ == "__main__":
     processed_dir = Path(__file__).parent.parent / "data" / "processed"
     laps_path = processed_dir / "laps_clean.parquet"
 
-    df = pd.read_parquet(laps_path)
-
-    evaluate_model(df)
+    if not laps_path.exists():
+        print(f"⚠️ File non trovato: {laps_path}")
+    else:
+        df = pd.read_parquet(laps_path)
+        if df.empty:
+            print(f"⚠️ File vuoto: {laps_path}")
+        else:
+            evaluate_model(df)

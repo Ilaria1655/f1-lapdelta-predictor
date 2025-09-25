@@ -5,10 +5,7 @@ import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import matplotlib.pyplot as plt
 import seaborn as sns
-
-from train_model import build_pipeline  # usa la pipeline del modello
-from features import add_features
-from data_prep import save_all_csvs, save_pit_stops
+from matplotlib.backends.backend_pdf import PdfPages
 
 # -----------------------
 # Setup cartelle
@@ -19,45 +16,43 @@ output_dir = root_dir / "outputs"
 output_dir.mkdir(exist_ok=True)
 
 laps_path = processed_dir / "laps_clean.parquet"
-pit_path = processed_dir / "pit_stops.parquet"
 model_path = processed_dir / "lapdelta_model.joblib"
+report_path = output_dir / "lapdelta_report.pdf"
 
 # -----------------------
-# Step 1: Prepara CSV e pit
-# -----------------------
-save_all_csvs()
-save_pit_stops()
-
-# -----------------------
-# Step 2: Carica dataset
+# Caricamento dati e modello
 # -----------------------
 df = pd.read_parquet(laps_path)
-pit_df = pd.read_parquet(pit_path)
+model = joblib.load(model_path)
+print(f"✅ Modello caricato da {model_path}")
 
 # -----------------------
-# Step 3: Addestra modello
+# Colonne coerenti con il modello
 # -----------------------
-X = df[['LapNumber', 'RollingAvgLap', 'TyreAge', 'DegradationRate', 'Driver', 'Compound']]
-y = df['LapDelta']
+NUM_COLS = ['LapNumber', 'RollingAvgLap', 'TyreAge', 'DegradationRate', 'Stint']
+CAT_COLS = ['Driver', 'Compound', 'CircuitId', 'IsOutLap']
+TARGET = 'LapDelta'
 
-pipe = build_pipeline()
-pipe.fit(X, y)
+# Assicurati che tutte le colonne esistano
+for col in NUM_COLS + CAT_COLS:
+    if col not in df.columns:
+        df[col] = 0 if col in NUM_COLS else 'Unknown'
 
-joblib.dump(pipe, model_path)
-print(f"✅ Modello addestrato e salvato in {model_path}")
-
-# -----------------------
-# Step 4: Predizioni
-# -----------------------
-y_pred = pipe.predict(X)
-errors = y_pred - y
+X = df[NUM_COLS + CAT_COLS]
+y_true = df[TARGET]
 
 # -----------------------
-# Step 5: Metriche
+# Predizioni
 # -----------------------
-mae = mean_absolute_error(y, y_pred)
-rmse = np.sqrt(mean_squared_error(y, y_pred))
-r2 = r2_score(y, y_pred)
+y_pred = model.predict(X)
+errors = y_pred - y_true
+
+# -----------------------
+# Metriche
+# -----------------------
+mae = mean_absolute_error(y_true, y_pred)
+rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+r2 = r2_score(y_true, y_pred)
 
 print("\n📊 Metriche modello LapDelta:")
 print(f"   MAE  : {mae:.3f} sec")
@@ -65,39 +60,73 @@ print(f"   RMSE : {rmse:.3f} sec")
 print(f"   R²   : {r2:.3f}")
 
 # -----------------------
-# Step 6: Grafici
+# Configurazioni grafici
 # -----------------------
+sns.set(style="whitegrid")
+plt.rcParams.update({'figure.max_open_warning': 0})
 
-# Pred vs Real
-plt.figure(figsize=(6,6))
-sns.scatterplot(x=y, y=y_pred, alpha=0.3)
-plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--', lw=2, label="Ideale")
-plt.xlabel("LapDelta Reale [s]")
-plt.ylabel("LapDelta Predetto [s]")
-plt.title("Predetto vs Reale")
-plt.legend()
-plt.tight_layout()
-plt.savefig(output_dir / "pred_vs_real.png", dpi=150)
+with PdfPages(report_path) as pdf:
 
-# Distribuzione errori
-plt.figure(figsize=(6,4))
-sns.histplot(errors, bins=50, kde=True)
-plt.axvline(0, color="red", linestyle="--")
-plt.xlabel("Errore (Pred - Real) [s]")
-plt.ylabel("Frequenza")
-plt.title("Distribuzione degli errori")
-plt.tight_layout()
-plt.savefig(output_dir / "error_distribution.png", dpi=150)
+    # 1️⃣ Pred vs Real
+    fig, ax = plt.subplots(figsize=(6,6))
+    sns.scatterplot(x=y_true, y=y_pred, alpha=0.3, ax=ax)
+    ax.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 'r--', lw=2, label="Ideale")
+    ax.set_xlabel("LapDelta Reale [s]")
+    ax.set_ylabel("LapDelta Predetto [s]")
+    ax.set_title("Predetto vs Reale")
+    ax.legend()
+    plt.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+    fig.savefig(output_dir / "pred_vs_real.png", dpi=150)
 
-# Boxplot per driver
-df_eval = df.copy()
-df_eval["Error"] = errors
-plt.figure(figsize=(10,5))
-sns.boxplot(x="Driver", y="Error", data=df_eval)
-plt.axhline(0, color="red", linestyle="--")
-plt.title("Distribuzione errore per pilota")
-plt.xticks(rotation=90)
-plt.tight_layout()
-plt.savefig(output_dir / "error_by_driver.png", dpi=150)
+    # 2️⃣ Distribuzione errori
+    fig, ax = plt.subplots(figsize=(6,4))
+    sns.histplot(errors, bins=50, kde=True, ax=ax)
+    ax.axvline(0, color="red", linestyle="--")
+    ax.set_xlabel("Errore (Pred - Real) [s]")
+    ax.set_ylabel("Frequenza")
+    ax.set_title("Distribuzione degli errori")
+    plt.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+    fig.savefig(output_dir / "error_distribution.png", dpi=150)
+
+    # 3️⃣ Boxplot per driver (top 20)
+    df_eval = df.copy()
+    df_eval["Error"] = errors
+    top_drivers = df['Driver'].value_counts().index[:20].tolist()
+    fig, ax = plt.subplots(figsize=(12,5))
+    sns.boxplot(x="Driver", y="Error", data=df_eval[df_eval['Driver'].isin(top_drivers)], ax=ax)
+    ax.axhline(0, color="red", linestyle="--")
+    ax.set_title("Distribuzione errore per pilota (top 20)")
+    plt.xticks(rotation=90)
+    plt.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+    fig.savefig(output_dir / "error_by_driver.png", dpi=150)
+
+    # 4️⃣ Feature importance (se LGBM presente nella pipeline)
+    try:
+        model_lgbm = model.named_steps['model']
+        importances = model_lgbm.feature_importances_
+        preproc = model.named_steps['preproc']
+        num_features = NUM_COLS
+        cat_pipe = preproc.named_transformers_['cat']
+        ohe = cat_pipe.named_steps['ohe']
+        cat_features = list(ohe.get_feature_names_out(CAT_COLS))
+        feature_names = num_features + cat_features
+        feat_imp = pd.DataFrame({"Feature": feature_names, "Importance": importances[:len(feature_names)]})
+        feat_imp = feat_imp.sort_values(by="Importance", ascending=False)
+        fig, ax = plt.subplots(figsize=(8,6))
+        sns.barplot(x="Importance", y="Feature", data=feat_imp.head(20), ax=ax)
+        ax.set_title("Feature importance (LGBM)")
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+        fig.savefig(output_dir / "feature_importance.png", dpi=150)
+    except Exception as e:
+        print("⚠️ Impossibile calcolare feature importance:", e)
 
 print(f"\n📈 Grafici salvati in {output_dir}")
+print(f"📄 PDF report generato in {report_path}")

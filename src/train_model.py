@@ -28,8 +28,8 @@ if df.empty:
 # -------------------------
 # Features & target
 # -------------------------
-NUM_COLS = ['LapNumber', 'RollingAvgLap', 'TyreAge', 'DegradationRate']
-CAT_COLS = ['Driver', 'Compound']
+NUM_COLS = ['LapNumber', 'RollingAvgLap', 'TyreAge', 'DegradationRate', 'Stint']  # aggiunto Stint
+CAT_COLS = ['Driver', 'Compound', 'CircuitId', 'IsOutLap']  # aggiunto IsOutLap
 TARGET = 'LapDelta'
 
 # Assicurati che tutte le colonne esistano

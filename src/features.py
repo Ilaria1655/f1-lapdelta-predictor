@@ -1,35 +1,53 @@
 from pathlib import Path
 import pandas as pd
 
+# -------------------------
+# 1️⃣ Setup cartelle
+# -------------------------
 root_dir = Path(__file__).parent.parent
+raw_dir = root_dir / 'data' / 'raw'
 processed_dir = root_dir / 'data' / 'processed'
+processed_dir.mkdir(parents=True, exist_ok=True)
 
+# -------------------------
+# 2️⃣ Caricamento dati
+# -------------------------
 laps_path = processed_dir / 'laps_processed.parquet'
 pit_stops_path = processed_dir / 'pit_stops.parquet'
+drivers_path = raw_dir / 'drivers.csv'
 
-# Carica
-laps_df = pd.read_parquet(laps_path)
-pit_df = pd.read_parquet(pit_stops_path)
-
-# Mappa driverId -> codice (se servisse)
-drivers_path = root_dir / 'data' / 'raw' / 'drivers.csv'
+laps_df = pd.read_parquet(laps_path) if laps_path.exists() else pd.DataFrame()
+pit_df = pd.read_parquet(pit_stops_path) if pit_stops_path.exists() else pd.DataFrame()
 drivers_df = pd.read_csv(drivers_path)
+
+# Mappa driverId -> codice
 piloti_f1 = drivers_df[['driverId', 'code']].dropna(subset=['code'])
 DRIVER_MAP = dict(zip(piloti_f1['driverId'], piloti_f1['code']))
 
+# -------------------------
+# 3️⃣ Funzione di feature engineering
+# -------------------------
 def add_features(df: pd.DataFrame, pit_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Crea Stint, TyreAge, IsOutLap, DegradationRate, RollingAvgLap (senza leakage)
-    e LapDelta (target): LapTimeSeconds - best lap del driver nella stessa gara (RaceId).
+    Crea feature:
+    - Stint
+    - TyreAge
+    - IsOutLap
+    - DegradationRate
+    - RollingAvgLap
+    - LapDelta (rispetto al best lap del driver nella stessa gara)
     """
+    if df.empty:
+        return df
+
     # mappa pit laps per driverId
     pit_laps_map = pit_df.groupby('driverId')['lap'].apply(list).to_dict()
 
-    # costruisco Stint usando driverId quando possibile
+    # Stint
     def get_stint(row):
         driver_id = row.get('driverId', None)
         if pd.isna(driver_id):
-            # try mapping by code
+            # fallback mapping da codice
             codes = [k for k, v in DRIVER_MAP.items() if v == row.get('Driver')]
             driver_id = codes[0] if codes else None
         pit_laps = sorted(pit_laps_map.get(driver_id, [])) if driver_id is not None else []
@@ -42,24 +60,18 @@ def add_features(df: pd.DataFrame, pit_df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['Stint'] = df.apply(get_stint, axis=1)
 
-    # TyreAge: numero di giro nello stesso stint (0-based)
+    # TyreAge
     df['TyreAge'] = df.groupby(['Driver', 'Stint']).cumcount()
 
-    # IsOutLap: True se il giro è subito dopo un pit
-    def is_out_lap(row):
-        driver_id = row.get('driverId', None)
-        if pd.isna(driver_id):
-            codes = [k for k, v in DRIVER_MAP.items() if v == row.get('Driver')]
-            driver_id = codes[0] if codes else None
-        pit_laps = pit_laps_map.get(driver_id, []) if driver_id is not None else []
-        return (row['LapNumber'] - 1) in pit_laps
+    # IsOutLap
+    df['IsOutLap'] = df.apply(
+        lambda row: (row['LapNumber'] - 1) in pit_laps_map.get(row.get('driverId'), []), axis=1
+    )
 
-    df['IsOutLap'] = df.apply(is_out_lap, axis=1)
-
-    # DegradationRate: differenza rispetto al giro precedente nello stesso stint
+    # DegradationRate
     df['DegradationRate'] = df.groupby(['Driver', 'Stint'])['LapTimeSeconds'].diff().fillna(0)
 
-    # RollingAvgLap: media ultimi 3 giri **precedenti** al giro corrente (shift)
+    # RollingAvgLap
     df['RollingAvgLap'] = df.groupby('Driver')['LapTimeSeconds'].transform(
         lambda x: x.shift(1).rolling(3, min_periods=1).mean()
     )
@@ -68,18 +80,19 @@ def add_features(df: pd.DataFrame, pit_df: pd.DataFrame) -> pd.DataFrame:
     if 'Compound' not in df.columns:
         df['Compound'] = 'Unknown'
 
-    # LapDelta: rispetto al best lap dello stesso pilota nella stessa gara (RaceId)
+    # LapDelta
     if 'RaceId' in df.columns:
         df['MinLapByDriverRace'] = df.groupby(['Driver', 'RaceId'])['LapTimeSeconds'].transform('min')
     else:
-        # se manca RaceId, fallback a best driver in tutto il dataset (meno ideale)
         df['MinLapByDriverRace'] = df.groupby('Driver')['LapTimeSeconds'].transform('min')
 
     df['LapDelta'] = df['LapTimeSeconds'] - df['MinLapByDriverRace']
 
     return df
 
-# applica e salva
+# -------------------------
+# 4️⃣ Applica e salva
+# -------------------------
 laps_features = add_features(laps_df, pit_df)
 output_path = processed_dir / 'laps_features.parquet'
 laps_features.to_parquet(output_path, index=False)
