@@ -23,6 +23,7 @@ data/raw/
 # Processed files: parquet e modelli
 data/processed/*.parquet
 data/processed/*.joblib
+data/processed/2024
 
 # Logs
 *.log
@@ -34,3 +35,5 @@ data/processed/*.joblib
 .idea/
 .DS_Store
 Thumbs.db
+/data/processed/2024/
+/data/

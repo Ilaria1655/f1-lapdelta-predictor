@@ -5,95 +5,145 @@ import pandas as pd
 # 1️⃣ Setup cartelle
 # -------------------------
 root_dir = Path(__file__).parent.parent
-raw_dir = root_dir / 'data' / 'raw'
-processed_dir = root_dir / 'data' / 'processed'
+raw_dir = root_dir / "data" / "raw"
+processed_dir = root_dir / "data" / "processed"
 processed_dir.mkdir(parents=True, exist_ok=True)
 
 # -------------------------
 # 2️⃣ Caricamento dati
 # -------------------------
-laps_path = processed_dir / 'laps_processed.parquet'
-pit_stops_path = processed_dir / 'pit_stops.parquet'
-drivers_path = raw_dir / 'drivers.csv'
+laps_path = processed_dir / "laps_processed.parquet"
+pit_stops_path = processed_dir / "pit_stops.parquet"
+drivers_path = raw_dir / "drivers.csv"
 
 laps_df = pd.read_parquet(laps_path) if laps_path.exists() else pd.DataFrame()
 pit_df = pd.read_parquet(pit_stops_path) if pit_stops_path.exists() else pd.DataFrame()
-drivers_df = pd.read_csv(drivers_path)
+drivers_df = pd.read_csv(drivers_path) if drivers_path.exists() else pd.DataFrame()
 
-# Mappa driverId -> codice
-piloti_f1 = drivers_df[['driverId', 'code']].dropna(subset=['code'])
-DRIVER_MAP = dict(zip(piloti_f1['driverId'], piloti_f1['code']))
+if laps_df.empty:
+    print("❌ Nessun laps_processed.parquet trovato o vuoto")
+    exit(1)
+
+# Mappa driverId -> code (fallback)
+if not drivers_df.empty:
+    piloti_f1 = drivers_df[["driverId", "code"]].dropna(subset=["code"])
+    DRIVER_MAP = dict(zip(piloti_f1["driverId"], piloti_f1["code"]))
+else:
+    DRIVER_MAP = {}
 
 # -------------------------
-# 3️⃣ Funzione di feature engineering
+# 3️⃣ Feature engineering dettagliata con log
 # -------------------------
 def add_features(df: pd.DataFrame, pit_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Crea feature:
+    Feature engineering con log dettagliato:
     - Stint
     - TyreAge
     - IsOutLap
     - DegradationRate
     - RollingAvgLap
-    - LapDelta (rispetto al best lap del driver nella stessa gara)
+    - LapDelta
     """
+
     if df.empty:
-        return df
-
-    # mappa pit laps per driverId
-    pit_laps_map = pit_df.groupby('driverId')['lap'].apply(list).to_dict()
-
-    # Stint
-    def get_stint(row):
-        driver_id = row.get('driverId', None)
-        if pd.isna(driver_id):
-            # fallback mapping da codice
-            codes = [k for k, v in DRIVER_MAP.items() if v == row.get('Driver')]
-            driver_id = codes[0] if codes else None
-        pit_laps = sorted(pit_laps_map.get(driver_id, [])) if driver_id is not None else []
-        stint = 1
-        for p in pit_laps:
-            if row['LapNumber'] > p:
-                stint += 1
-        return stint
+        return df.copy()
 
     df = df.copy()
-    df['Stint'] = df.apply(get_stint, axis=1)
 
-    # TyreAge
-    df['TyreAge'] = df.groupby(['Driver', 'Stint']).cumcount()
-
-    # IsOutLap
-    df['IsOutLap'] = df.apply(
-        lambda row: (row['LapNumber'] - 1) in pit_laps_map.get(row.get('driverId'), []), axis=1
+    # fallback driverId
+    df["driverId_filled"] = df["driverId"].copy()
+    missing_driver_id = df["driverId_filled"].isna()
+    df.loc[missing_driver_id, "driverId_filled"] = df.loc[missing_driver_id, "Driver"].map(
+        {v: k for k, v in DRIVER_MAP.items()}
     )
 
+    # inizializzazione
+    df["Stint"] = 1
+    df["TyreAge"] = 0
+    df["IsOutLap"] = False
+
+    if not pit_df.empty:
+        pit_map = pit_df.groupby("driverId")["lap"].apply(list).to_dict()
+        pit_set_map = pit_df.groupby("driverId")["lap"].apply(set).to_dict()
+
+    total_groups = df.groupby(["RaceId", "driverId_filled"]).ngroups
+    print(f"🚀 Inizio elaborazione dettagliata di {total_groups} driver-gara...")
+
+    stint_list = []
+    tyreage_list = []
+    outlap_list = []
+
+    for i, ((race_id, driver_id), group) in enumerate(df.groupby(["RaceId", "driverId_filled"]), start=1):
+        laps = group["LapNumber"].tolist()
+        pits = sorted(pit_map.get(driver_id, [])) if not pit_df.empty else []
+        stint = 1
+        tyre_age = 0
+
+        stint_col = []
+        tyre_col = []
+        outlap_col = []
+
+        for lap in laps:
+            # outlap
+            is_outlap = (lap - 1) in pit_set_map.get(driver_id, set()) if not pit_df.empty else False
+            outlap_col.append(is_outlap)
+
+            # stint e tyre age
+            if pits and lap > pits[0]:
+                pits.pop(0)
+                stint += 1
+                tyre_age = 0
+            stint_col.append(stint)
+            tyre_col.append(tyre_age)
+            tyre_age += 1
+
+        stint_list.extend(stint_col)
+        tyreage_list.extend(tyre_col)
+        outlap_list.extend(outlap_col)
+
+        # log dettagliato ogni 100 gruppi o ultimo gruppo
+        if i % 100 == 0 or i == total_groups:
+            print(f"📊 Elaborati {i}/{total_groups} gruppi | driver {driver_id} | race {race_id} | {len(laps)} giri | max stint {max(stint_col)}")
+
+    df["Stint"] = stint_list
+    df["TyreAge"] = tyreage_list
+    df["IsOutLap"] = outlap_list
+
     # DegradationRate
-    df['DegradationRate'] = df.groupby(['Driver', 'Stint'])['LapTimeSeconds'].diff().fillna(0)
+    df["DegradationRate"] = df.groupby(["Driver", "Stint"])["LapTimeSeconds"].diff().fillna(0)
 
     # RollingAvgLap
-    df['RollingAvgLap'] = df.groupby('Driver')['LapTimeSeconds'].transform(
+    df["RollingAvgLap"] = df.groupby("Driver")["LapTimeSeconds"].transform(
         lambda x: x.shift(1).rolling(3, min_periods=1).mean()
     )
 
     # Compound fallback
-    if 'Compound' not in df.columns:
-        df['Compound'] = 'Unknown'
+    if "Compound" not in df.columns:
+        df["Compound"] = "Unknown"
 
     # LapDelta
-    if 'RaceId' in df.columns:
-        df['MinLapByDriverRace'] = df.groupby(['Driver', 'RaceId'])['LapTimeSeconds'].transform('min')
+    if "RaceId" in df.columns:
+        df["MinLapByDriverRace"] = df.groupby(["Driver", "RaceId"])["LapTimeSeconds"].transform("min")
     else:
-        df['MinLapByDriverRace'] = df.groupby('Driver')['LapTimeSeconds'].transform('min')
+        df["MinLapByDriverRace"] = df.groupby("Driver")["LapTimeSeconds"].transform("min")
 
-    df['LapDelta'] = df['LapTimeSeconds'] - df['MinLapByDriverRace']
+    df["LapDelta"] = df["LapTimeSeconds"] - df["MinLapByDriverRace"]
 
+    # pulizia colonna temporanea
+    df.drop(columns=["driverId_filled"], inplace=True)
+
+    print("✅ Feature engineering dettagliata completata")
     return df
 
 # -------------------------
 # 4️⃣ Applica e salva
 # -------------------------
 laps_features = add_features(laps_df, pit_df)
-output_path = processed_dir / 'laps_features.parquet'
+
+if laps_features.empty:
+    print("❌ Nessun dato valido per feature engineering")
+    exit(1)
+
+output_path = processed_dir / "laps_features.parquet"
 laps_features.to_parquet(output_path, index=False)
-print(f"✅ Dataset con feature e LapDelta salvato in {output_path}")
+print(f"✅ Dataset con feature salvato in {output_path} ({len(laps_features)} righe)")

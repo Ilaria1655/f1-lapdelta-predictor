@@ -6,6 +6,7 @@ import pandas as pd
 # -------------------------
 root_dir = Path(__file__).parent.parent
 processed_dir = root_dir / 'data' / 'processed'
+processed_dir.mkdir(parents=True, exist_ok=True)
 
 input_path = processed_dir / 'laps_features.parquet'
 output_path = processed_dir / 'laps_clean.parquet'
@@ -13,7 +14,16 @@ output_path = processed_dir / 'laps_clean.parquet'
 # -------------------------
 # 2️⃣ Caricamento dati
 # -------------------------
-df = pd.read_parquet(input_path) if input_path.exists() else pd.DataFrame()
+if not input_path.exists():
+    print(f"❌ File {input_path} non trovato, impossibile creare laps_clean.parquet")
+    exit(1)
+
+df = pd.read_parquet(input_path)
+if df.empty:
+    print("❌ laps_features.parquet vuoto, niente da pulire")
+    exit(1)
+
+print(f"ℹ️ Caricato {len(df)} righe da laps_features.parquet")
 
 # -------------------------
 # 3️⃣ Colonne da mantenere
@@ -36,15 +46,18 @@ columns_keep = [
 # filtra solo colonne esistenti
 columns_keep = [c for c in columns_keep if c in df.columns]
 df_clean = df[columns_keep].copy()
+print(f"ℹ️ Colonne mantenute: {columns_keep}")
 
 # -------------------------
-# 4️⃣ Pulizia righe
+# 4️⃣ Pulizia righe e tipizzazione
 # -------------------------
 # rimuovi righe senza target
 df_clean = df_clean.dropna(subset=['LapTimeSeconds', 'LapDelta'])
+print(f"ℹ️ Righe rimaste dopo rimozione NaN su LapTimeSeconds/LapDelta: {len(df_clean)}")
 
-# fillna e tipizzazione coerente
-df_clean['RollingAvgLap'] = df_clean['RollingAvgLap'].fillna(df_clean['LapTimeSeconds'])
+# fillna coerente e tipizzazione
+if 'RollingAvgLap' in df_clean.columns:
+    df_clean['RollingAvgLap'] = df_clean['RollingAvgLap'].fillna(df_clean['LapTimeSeconds'])
 if 'TyreAge' in df_clean.columns:
     df_clean['TyreAge'] = df_clean['TyreAge'].fillna(0).astype(int)
 if 'DegradationRate' in df_clean.columns:
@@ -58,4 +71,4 @@ if 'Compound' in df_clean.columns:
 # 5️⃣ Salvataggio dataset pulito
 # -------------------------
 df_clean.to_parquet(output_path, index=False)
-print(f"✅ Dataset pulito con LapDelta e Circuit salvato in {output_path}")
+print(f"✅ Dataset pulito salvato in {output_path} ({len(df_clean)} righe)")
