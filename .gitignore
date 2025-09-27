@@ -37,3 +37,6 @@ data/processed/2024
 Thumbs.db
 /data/processed/2024/
 /data/
+/fastf1-cache/
+*.ff1pkl
+/fastf1-cache/2023/
