@@ -5,7 +5,6 @@ import pandas as pd
 # 1️⃣ Setup cartelle
 # -------------------------
 root_dir = Path(__file__).parent.parent
-raw_dir = root_dir / "data" / "raw"
 processed_dir = root_dir / "data" / "processed"
 processed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -14,11 +13,11 @@ processed_dir.mkdir(parents=True, exist_ok=True)
 # -------------------------
 laps_path = processed_dir / "laps_processed.parquet"
 pit_stops_path = processed_dir / "pit_stops.parquet"
-drivers_path = raw_dir / "drivers.csv"
+drivers_path = processed_dir / "drivers.parquet"  # Ora usiamo il parquet già processato
 
 laps_df = pd.read_parquet(laps_path) if laps_path.exists() else pd.DataFrame()
 pit_df = pd.read_parquet(pit_stops_path) if pit_stops_path.exists() else pd.DataFrame()
-drivers_df = pd.read_csv(drivers_path) if drivers_path.exists() else pd.DataFrame()
+drivers_df = pd.read_parquet(drivers_path) if drivers_path.exists() else pd.DataFrame()
 
 if laps_df.empty:
     print("❌ Nessun laps_processed.parquet trovato o vuoto")
@@ -26,8 +25,7 @@ if laps_df.empty:
 
 # Mappa driverId -> code (fallback)
 if not drivers_df.empty:
-    piloti_f1 = drivers_df[["driverId", "code"]].dropna(subset=["code"])
-    DRIVER_MAP = dict(zip(piloti_f1["driverId"], piloti_f1["code"]))
+    DRIVER_MAP = dict(zip(drivers_df["driverId"], drivers_df["code"]))
 else:
     DRIVER_MAP = {}
 
@@ -110,10 +108,10 @@ def add_features(df: pd.DataFrame, pit_df: pd.DataFrame) -> pd.DataFrame:
     df["IsOutLap"] = outlap_list
 
     # DegradationRate
-    df["DegradationRate"] = df.groupby(["Driver", "Stint"])["LapTimeSeconds"].diff().fillna(0)
+    df["DegradationRate"] = df.groupby(["Driver", "Stint"])["LapTimeSecondsFF1"].diff().fillna(0)
 
     # RollingAvgLap
-    df["RollingAvgLap"] = df.groupby("Driver")["LapTimeSeconds"].transform(
+    df["RollingAvgLap"] = df.groupby("Driver")["LapTimeSecondsFF1"].transform(
         lambda x: x.shift(1).rolling(3, min_periods=1).mean()
     )
 
@@ -123,11 +121,11 @@ def add_features(df: pd.DataFrame, pit_df: pd.DataFrame) -> pd.DataFrame:
 
     # LapDelta
     if "RaceId" in df.columns:
-        df["MinLapByDriverRace"] = df.groupby(["Driver", "RaceId"])["LapTimeSeconds"].transform("min")
+        df["MinLapByDriverRace"] = df.groupby(["Driver", "RaceId"])["LapTimeSecondsFF1"].transform("min")
     else:
-        df["MinLapByDriverRace"] = df.groupby("Driver")["LapTimeSeconds"].transform("min")
+        df["MinLapByDriverRace"] = df.groupby("Driver")["LapTimeSecondsFF1"].transform("min")
 
-    df["LapDelta"] = df["LapTimeSeconds"] - df["MinLapByDriverRace"]
+    df["LapDelta"] = df["LapTimeSecondsFF1"] - df["MinLapByDriverRace"]
 
     # pulizia colonna temporanea
     df.drop(columns=["driverId_filled"], inplace=True)
