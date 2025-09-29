@@ -1,15 +1,39 @@
-# train_model_realistic_cv.py
+import os
+import datetime
+import joblib
+import warnings
+import logging
 from pathlib import Path
+
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-import joblib
-import datetime
-import os
 from sklearn.model_selection import GroupKFold
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import optuna
 from optuna.integration import LightGBMPruningCallback
+from lightgbm import early_stopping, log_evaluation
+from tqdm import tqdm
+
+# ------------------------- Logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S"
+)
+
+logger = logging.getLogger(__name__)
+
+# ------------------------- Silenzia warning inutili
+warnings.filterwarnings("ignore", category=UserWarning)
+
+class SilentLogger:
+    def info(self, msg):
+        pass
+    def warning(self, msg):
+        pass
+
+lgb.register_logger(SilentLogger())
 
 # ------------------------- Setup cartelle
 root_dir = Path(__file__).parent.parent
@@ -24,6 +48,8 @@ laps_path = processed_dir / "laps_clean_final.parquet"
 if not laps_path.exists():
     raise FileNotFoundError(f"{laps_path} non trovato!")
 
+# ------------------------- Caricamento dati
+logger.info("Caricamento e preparazione dati...")
 df = pd.read_parquet(laps_path)
 if df.empty:
     raise ValueError("laps_clean_final.parquet è vuoto")
@@ -37,7 +63,7 @@ df['LapDiffFromRollingAvg'] = df['LapNumber'] - df['RollingAvgLap']
 df['TyreEff'] = df['TyreAge'] * df['DegradationRate']
 df['LapAgeFactor'] = df['LapNumber'] / (df['TyreAge'] + 1)
 
-# PrevLapDelta corretto: calcolato prima del fold per evitare leakage
+# PrevLapDelta calcolato per evitare leakage
 df['PrevLapDelta'] = df.groupby(['Driver', 'CircuitId'])[TARGET].shift(1)
 
 NUM_COLS += ['LapDiffFromRollingAvg', 'TyreEff', 'LapAgeFactor', 'PrevLapDelta']
@@ -45,8 +71,10 @@ NUM_COLS += ['LapDiffFromRollingAvg', 'TyreEff', 'LapAgeFactor', 'PrevLapDelta']
 for col in CAT_COLS:
     df[col] = df[col].astype('category')
 
+# Filtro outlier
 df = df[(df[TARGET] > 0) & (df[TARGET] < 5)]
 
+# Target scalato per maggiore stabilità
 df['LapDeltaScaled'] = df[TARGET] * 10
 TARGET_SCALED = 'LapDeltaScaled'
 
@@ -56,7 +84,7 @@ y = df[TARGET_SCALED]
 df['group'] = df['Driver'].astype(str) + "___" + df['CircuitId'].astype(str)
 groups = df['group']
 
-# ------------------------- Funzione obiettivo Optuna (solo su fold 0 per velocità)
+# ------------------------- Funzione obiettivo Optuna
 def objective(trial, X_train, X_val, y_train, y_val):
     params = {
         'objective': 'regression',
@@ -77,115 +105,118 @@ def objective(trial, X_train, X_val, y_train, y_val):
         'verbosity': -1
     }
 
-    lgb_train = lgb.Dataset(X_train, y_train, categorical_feature=CAT_COLS, free_raw_data=False)
-    lgb_val = lgb.Dataset(X_val, y_val, categorical_feature=CAT_COLS, reference=lgb_train, free_raw_data=False)
-
-    model = lgb.train(
-        params,
-        lgb_train,
-        num_boost_round=200,
-        valid_sets=[lgb_val],
+    model = lgb.LGBMRegressor(**params, n_estimators=200)
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        eval_metric="mae",
         callbacks=[
-            lgb.early_stopping(stopping_rounds=30),
-            LightGBMPruningCallback(trial, "l1"),
-            lgb.log_evaluation(period=0)
+            early_stopping(stopping_rounds=30),
+            log_evaluation(period=0)
         ]
     )
 
-    preds = model.predict(X_val, num_iteration=model.best_iteration)
+    preds = model.predict(X_val, num_iteration=model.best_iteration_)
     mae = mean_absolute_error(y_val, preds)
     return mae
 
-# ------------------------- Ottimizzazione Optuna (solo sul primo fold)
-gkf = GroupKFold(n_splits=3)
-folds = list(gkf.split(X, y, groups=groups))
+# ------------------------- Main training
+def main():
+    gkf = GroupKFold(n_splits=3)
+    folds = list(gkf.split(X, y, groups=groups))
 
-train_idx, val_idx = folds[0]
-X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-
-# Riempi PrevLapDelta con mediana di training per fold usando .loc per evitare warning
-X_train.loc[:, 'PrevLapDelta'] = X_train['PrevLapDelta'].fillna(0.0)
-X_val.loc[:, 'PrevLapDelta'] = X_val['PrevLapDelta'].fillna(X_train['PrevLapDelta'].median())
-
-study = optuna.create_study(
-    direction='minimize',
-    sampler=optuna.samplers.TPESampler(seed=42),
-    pruner=optuna.pruners.MedianPruner()
-)
-study.optimize(lambda trial: objective(trial, X_train, X_val, y_train, y_val),
-               n_trials=25, show_progress_bar=True)
-best_params = study.best_params
-
-best_params.update({
-    'objective': 'regression',
-    'metric': 'l1',
-    'boosting_type': 'gbdt',
-    'random_state': 42,
-    'verbosity': -1,
-    'num_threads': os.cpu_count()
-})
-
-print(f"✅ Migliori parametri trovati (fold 0): {best_params}")
-
-# ------------------------- Training su 3 fold con i migliori parametri
-metrics = []
-models = []
-
-timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-model_folder = models_dir / timestamp
-model_folder.mkdir(parents=True, exist_ok=True)
-
-for fold, (train_idx, val_idx) in enumerate(folds):
-    print(f"\n🔄 Training fold {fold+1}/3...")
-    X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+    train_idx, val_idx = folds[0]
+    X_train, X_val = X.iloc[train_idx].copy(), X.iloc[val_idx].copy()
     y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
-    # Riempi PrevLapDelta per fold usando .loc
+    # Fill PrevLapDelta
     X_train.loc[:, 'PrevLapDelta'] = X_train['PrevLapDelta'].fillna(0.0)
     X_val.loc[:, 'PrevLapDelta'] = X_val['PrevLapDelta'].fillna(X_train['PrevLapDelta'].median())
 
-    lgb_train = lgb.Dataset(X_train, y_train, categorical_feature=CAT_COLS, free_raw_data=False)
-    lgb_val = lgb.Dataset(X_val, y_val, categorical_feature=CAT_COLS, reference=lgb_train, free_raw_data=False)
-
-    model = lgb.train(
-        best_params,
-        lgb_train,
-        num_boost_round=2000,
-        valid_sets=[lgb_val],
-        callbacks=[lgb.early_stopping(stopping_rounds=100), lgb.log_evaluation(period=100)]
+    logger.info("Avvio ottimizzazione Optuna (solo fold 0)...")
+    study = optuna.create_study(
+        direction='minimize',
+        sampler=optuna.samplers.TPESampler(seed=42),
+        pruner=optuna.pruners.MedianPruner()
     )
 
-    models.append(model)
-    model.save_model(model_folder / f"lgb_model_fold{fold}.txt")
+    for _ in tqdm(range(25), desc="Optuna Trials", ncols=100):
+        study.optimize(lambda trial: objective(trial, X_train, X_val, y_train, y_val), n_trials=1)
 
-    y_pred_val = model.predict(X_val, num_iteration=model.best_iteration)
-    mae = mean_absolute_error(y_val, y_pred_val)
-    rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
-    r2 = r2_score(y_val, y_pred_val)
+    best_params = study.best_params
+    best_params.update({
+        'objective': 'regression',
+        'metric': 'l1',
+        'boosting_type': 'gbdt',
+        'random_state': 42,
+        'verbosity': -1,
+        'num_threads': os.cpu_count()
+    })
 
-    metrics.append((mae, rmse, r2))
-    print(f"📊 Fold {fold} - MAE: {mae/10:.3f} sec | RMSE: {rmse/10:.3f} sec | R²: {r2:.3f}")
+    logger.info(f"Migliori parametri trovati: {best_params}")
 
-# ------------------------- Media metriche sui fold
-mae_mean = np.mean([m[0] for m in metrics])
-rmse_mean = np.mean([m[1] for m in metrics])
-r2_mean = np.mean([m[2] for m in metrics])
+    # ------------------------- Training su tutti i fold
+    metrics = []
+    models = []
 
-print("\n📈 Metriche medie su 3 fold:")
-print(f"MAE: {mae_mean/10:.3f} sec")
-print(f"RMSE: {rmse_mean/10:.3f} sec")
-print(f"R²: {r2_mean:.3f}")
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_folder = models_dir / timestamp
+    model_folder.mkdir(parents=True, exist_ok=True)
 
-# ------------------------- Salvataggio info
-feature_info = {
-    "NUM_COLS": NUM_COLS,
-    "CAT_COLS": CAT_COLS,
-    "TARGET": TARGET,
-    "TARGET_SCALED": TARGET_SCALED,
-    "n_folds": 3,
-    "model_paths": [str(model_folder / f"lgb_model_fold{i}.txt") for i in range(3)]
-}
-joblib.dump(feature_info, model_folder / "feature_info.joblib")
+    for fold, (train_idx, val_idx) in enumerate(tqdm(folds, desc="Training Folds", ncols=100)):
+        logger.info(f"Training fold {fold+1}/3...")
 
-print(f"\n✅ Modelli e feature info salvati in {model_folder}")
+        X_train, X_val = X.iloc[train_idx].copy(), X.iloc[val_idx].copy()
+        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+        X_train.loc[:, 'PrevLapDelta'] = X_train['PrevLapDelta'].fillna(0.0)
+        X_val.loc[:, 'PrevLapDelta'] = X_val['PrevLapDelta'].fillna(X_train['PrevLapDelta'].median())
+
+        model = lgb.LGBMRegressor(**best_params, n_estimators=2000)
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            eval_metric="mae",
+            callbacks=[
+                early_stopping(stopping_rounds=100),
+                log_evaluation(period=0)
+            ]
+        )
+
+        models.append(model)
+        model.booster_.save_model(str(model_folder / f"lgb_model_fold{fold}.txt"))
+
+        y_pred_val = model.predict(X_val, num_iteration=model.best_iteration_)
+        mae = mean_absolute_error(y_val, y_pred_val)
+        rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
+        r2 = r2_score(y_val, y_pred_val)
+
+        metrics.append((mae, rmse, r2))
+        logger.info(f"Fold {fold+1} - MAE: {mae/10:.3f} sec | RMSE: {rmse/10:.3f} sec | R²: {r2:.3f}")
+
+    # ------------------------- Media metriche
+    mae_mean = np.mean([m[0] for m in metrics])
+    rmse_mean = np.mean([m[1] for m in metrics])
+    r2_mean = np.mean([m[2] for m in metrics])
+
+    logger.info("\nMetriche medie su 3 fold:")
+    logger.info(f"MAE: {mae_mean/10:.3f} sec")
+    logger.info(f"RMSE: {rmse_mean/10:.3f} sec")
+    logger.info(f"R²: {r2_mean:.3f}")
+
+    # ------------------------- Salvataggio info
+    feature_info = {
+        "NUM_COLS": NUM_COLS,
+        "CAT_COLS": CAT_COLS,
+        "TARGET": TARGET,
+        "TARGET_SCALED": TARGET_SCALED,
+        "n_folds": 3,
+        "model_paths": [str(model_folder / f"lgb_model_fold{i}.txt") for i in range(3)]
+    }
+    joblib.dump(feature_info, model_folder / "feature_info.joblib")
+
+    logger.info(f"Modelli e feature info salvati in {model_folder}")
+
+
+if __name__ == "__main__":
+    main()
