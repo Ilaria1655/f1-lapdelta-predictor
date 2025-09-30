@@ -83,13 +83,6 @@ La pipeline completa combina:
 La dashboard è stata sviluppata per **analizzare, confrontare e predire** in modo immediato.
 
 ### 🚀 Demo (GIF)
-
-👉 Inserisci qui la tua registrazione GIF della dashboard:
-
-![Demo](demo.gif)
-
-*Tip*: puoi registrare con [LICEcap](https://www.cockos.com/licecap/) o OBS e salvare direttamente in `.gif`.
-
 ---
 
 ## 📥 Installazione & Utilizzo
@@ -97,8 +90,7 @@ La dashboard è stata sviluppata per **analizzare, confrontare e predire** in mo
 1. **Clona la repo**
 
    ```bash
-   git clone https://github.com/tuouser/f1-lapdelta-predictor.git
-   cd f1-lapdelta-predictor
+   git clone https://github.com/Ilaria1655/simulator_4th_try.git
    ```
 
 2. **Crea l’ambiente**
