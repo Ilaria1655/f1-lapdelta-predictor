@@ -186,6 +186,10 @@ def main():
         models.append(model)
         model.booster_.save_model(str(model_folder / f"lgb_model_fold{fold}.txt"))
 
+        # 🔹 Salvataggio fold di validazione
+        joblib.dump(X_val, model_folder / f"X_val_fold{fold}.joblib")
+        joblib.dump(y_val, model_folder / f"y_val_fold{fold}.joblib")
+
         y_pred_val = model.predict(X_val, num_iteration=model.best_iteration_)
         mae = mean_absolute_error(y_val, y_pred_val)
         rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
