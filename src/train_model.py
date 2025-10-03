@@ -8,10 +8,8 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupKFold, train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-import optuna
-from optuna.integration import LightGBMPruningCallback
 from lightgbm import early_stopping, log_evaluation
 from tqdm import tqdm
 
@@ -84,78 +82,45 @@ y = df[TARGET_SCALED]
 df['group'] = df['Driver'].astype(str) + "___" + df['CircuitId'].astype(str)
 groups = df['group']
 
-# ------------------------- Funzione obiettivo Optuna
-def objective(trial, X_train, X_val, y_train, y_val):
-    params = {
-        'objective': 'regression',
-        'metric': 'l1',
-        'boosting_type': 'gbdt',
-        'learning_rate': trial.suggest_float('learning_rate', 0.02, 0.05),
-        'num_leaves': trial.suggest_int('num_leaves', 24, 80),
-        'max_depth': trial.suggest_int('max_depth', 4, 8),
-        'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 0.9),
-        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 0.9),
-        'bagging_freq': trial.suggest_int('bagging_freq', 1, 5),
-        'min_child_samples': trial.suggest_int('min_child_samples', 40, 120),
-        'reg_alpha': trial.suggest_float('reg_alpha', 1.0, 10.0),
-        'reg_lambda': trial.suggest_float('reg_lambda', 1.0, 10.0),
-        'max_bin': trial.suggest_int('max_bin', 255, 511),
-        'num_threads': os.cpu_count(),
-        'random_state': 42,
-        'verbosity': -1
-    }
+# ------------------------- Creazione test set separato (30%)
+X_trainval, X_test, y_trainval, y_test, groups_trainval, groups_test = train_test_split(
+    X, y, groups, test_size=0.3, random_state=42, stratify=groups
+)
 
-    model = lgb.LGBMRegressor(**params, n_estimators=200)
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        eval_metric="mae",
-        callbacks=[
-            early_stopping(stopping_rounds=30),
-            log_evaluation(period=0)
-        ]
-    )
+# Salvataggio test set per il testing finale
+joblib.dump(X_test, processed_dir / "X_test.joblib")
+joblib.dump(y_test, processed_dir / "y_test.joblib")
 
-    preds = model.predict(X_val, num_iteration=model.best_iteration_)
-    mae = mean_absolute_error(y_val, preds)
-    return mae
+logger.info(f"Test set salvato: {X_test.shape[0]} esempi")
+
+# Sostituisco X, y, groups con la parte train/validation
+X, y, groups = X_trainval, y_trainval, groups_trainval
+
+# ------------------------- Parametri fissi LightGBM
+BEST_PARAMS = {
+    'objective': 'regression',
+    'metric': 'l1',
+    'boosting_type': 'gbdt',
+    'learning_rate': 0.03,
+    'num_leaves': 48,
+    'max_depth': 6,
+    'feature_fraction': 0.8,
+    'bagging_fraction': 0.8,
+    'bagging_freq': 3,
+    'min_child_samples': 60,
+    'reg_alpha': 3.0,
+    'reg_lambda': 3.0,
+    'max_bin': 400,
+    'random_state': 42,
+    'verbosity': -1,
+    'num_threads': os.cpu_count()
+}
 
 # ------------------------- Main training
 def main():
     gkf = GroupKFold(n_splits=3)
     folds = list(gkf.split(X, y, groups=groups))
 
-    train_idx, val_idx = folds[0]
-    X_train, X_val = X.iloc[train_idx].copy(), X.iloc[val_idx].copy()
-    y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-
-    # Fill PrevLapDelta
-    X_train.loc[:, 'PrevLapDelta'] = X_train['PrevLapDelta'].fillna(0.0)
-    X_val.loc[:, 'PrevLapDelta'] = X_val['PrevLapDelta'].fillna(X_train['PrevLapDelta'].median())
-
-    logger.info("Avvio ottimizzazione Optuna (solo fold 0)...")
-    study = optuna.create_study(
-        direction='minimize',
-        sampler=optuna.samplers.TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner()
-    )
-
-    for _ in tqdm(range(25), desc="Optuna Trials", ncols=100):
-        study.optimize(lambda trial: objective(trial, X_train, X_val, y_train, y_val), n_trials=1)
-
-    best_params = study.best_params
-    best_params.update({
-        'objective': 'regression',
-        'metric': 'l1',
-        'boosting_type': 'gbdt',
-        'random_state': 42,
-        'verbosity': -1,
-        'num_threads': os.cpu_count()
-    })
-
-    logger.info(f"Migliori parametri trovati: {best_params}")
-
-    # ------------------------- Training su tutti i fold
     metrics = []
     models = []
 
@@ -169,10 +134,11 @@ def main():
         X_train, X_val = X.iloc[train_idx].copy(), X.iloc[val_idx].copy()
         y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
+        # Fill PrevLapDelta
         X_train.loc[:, 'PrevLapDelta'] = X_train['PrevLapDelta'].fillna(0.0)
         X_val.loc[:, 'PrevLapDelta'] = X_val['PrevLapDelta'].fillna(X_train['PrevLapDelta'].median())
 
-        model = lgb.LGBMRegressor(**best_params, n_estimators=2000)
+        model = lgb.LGBMRegressor(**BEST_PARAMS, n_estimators=2000)
         model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
@@ -207,6 +173,11 @@ def main():
     logger.info(f"MAE: {mae_mean/10:.3f} sec")
     logger.info(f"RMSE: {rmse_mean/10:.3f} sec")
     logger.info(f"R²: {r2_mean:.3f}")
+
+    # 🔹 Debug per verificare stabilità MAE
+    logger.info("Controllo stabilità MAE (run ripetibili):")
+    for i, (mae, _, _) in enumerate(metrics):
+        logger.info(f"Fold {i+1} MAE (scaled): {mae:.5f}")
 
     # ------------------------- Salvataggio info
     feature_info = {
