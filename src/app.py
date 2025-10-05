@@ -5,181 +5,207 @@ import joblib
 import lightgbm as lgb
 from pathlib import Path
 import plotly.graph_objects as go
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, median_absolute_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import datetime
 
-# ------------------- Configurazione pagina
-st.set_page_config(
-    page_title="🏎️ F1 LapDelta Predictor 2024",
-    layout="wide"
-)
+# ----------------------------- PAGE CONFIG
+st.set_page_config(page_title="🏁 F1 LapDelta Predictor — Pro Visual UI", layout="wide")
 
-st.title("🏎️ F1 LapDelta Predictor 2024")
+# ----------------------------- THEME / STYLE
 st.markdown("""
-Dashboard interattiva che mostra la previsione del **LapDelta** per il pilota selezionato e confronta
-la predizione con i dati storici sul circuito scelto.
-""")
+<style>
+    .stApp {
+        background-color: #0a0a0a;
+        color: #f1f1f1;
+        font-family: 'Roboto', sans-serif;
+    }
+    h1, h2, h3 {
+        color: #ff1801;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+    .sidebar .sidebar-content {
+        background-color: #111;
+    }
+    div[data-testid="stMetricValue"] {
+        color: #00ff88;
+        font-size: 2rem;
+        font-weight: bold;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# ------------------- Percorsi
-BASE_DIR = Path(__file__).parent.parent
+# ----------------------------- PAGE HEADER
+st.title("🏁 F1 LapDelta Predictor — Pro Visual UI")
+st.markdown("App focalizzata: inserisci i parametri del giro e ottieni subito la predizione del LapDelta, con insight visivi e metriche tecniche.")
+
+# ----------------------------- PATHS
+BASE_DIR = Path(__file__).resolve().parent.parent
 data_dir = BASE_DIR / "data"
 processed_dir = data_dir / "processed"
 models_dir = data_dir / "models"
 
-# ------------------- Caricamento modello
-latest_model_folder = max(models_dir.iterdir(), key=lambda d: d.stat().st_mtime)
-feature_info = joblib.load(latest_model_folder / "feature_info.joblib")
-model_paths = feature_info["model_paths"]
-models = [lgb.Booster(model_file=path) for path in model_paths]
-
-# ------------------- Caricamento dataset con cache
+# ----------------------------- HELPERS
 @st.cache_data(show_spinner=False)
-def load_laps():
-    return pd.read_parquet(processed_dir / "laps_clean_final.parquet")
+def list_model_folders(models_dir=models_dir):
+    if not models_dir.exists():
+        return []
+    return sorted([d for d in models_dir.iterdir() if d.is_dir()], key=lambda d: d.stat().st_mtime, reverse=True)
 
-laps_df = load_laps()
+@st.cache_data(show_spinner=False)
+def load_latest_model(models_dir=models_dir):
+    folders = list_model_folders(models_dir)
+    if not folders:
+        return None, None
+    latest = folders[0]
+    feature_info = joblib.load(latest / "feature_info.joblib")
+    model_paths = feature_info.get("model_paths", [])
+    models = []
+    for p in model_paths:
+        p = Path(p)
+        if p.exists():
+            try:
+                models.append(lgb.Booster(model_file=str(p)))
+            except Exception:
+                try:
+                    models.append(joblib.load(p))
+                except Exception:
+                    pass
+    return feature_info, models
 
-# ------------------- Sidebar Input
-st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/3/33/F1.svg", width=120)
-st.sidebar.markdown("### ⚙️ Configura il giro da predire")
+@st.cache_data(show_spinner=False)
+def load_laps(parquet_path=processed_dir / "laps_clean_final.parquet"):
+    if not parquet_path.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(parquet_path)
 
-drivers = sorted(laps_df['Driver'].unique())
-circuits = sorted(laps_df['name'].unique())
-compounds = sorted(laps_df['Compound'].unique())
+def ensemble_predict(models, X):
+    preds = [m.predict(X) for m in models]
+    return np.mean(preds, axis=0)
 
-driver_name = st.sidebar.selectbox("🏁 Pilota principale", drivers)
-circuit_name = st.sidebar.selectbox("🌍 Circuito", circuits)
-lap_number = st.sidebar.slider("🔢 Numero del giro", 1, 80, 1)
-tyre_age = st.sidebar.slider("🛞 Età pneumatico (giri)", 0, 50, 0)
-compound = st.sidebar.selectbox("⚡ Mescola", compounds)
-is_out_lap = st.sidebar.checkbox("🚦 Out Lap?")
-
-# ------------------- Mapping IDs
-driver_code = laps_df[laps_df['Driver'] == driver_name]['Driver'].iloc[0]
-circuit_code = laps_df[laps_df['name'] == circuit_name]['CircuitId'].iloc[0]
-
-# ------------------- Funzione feature engineering per predizione singola
-def compute_features(df, driver_code, circuit_code, lap_number, tyre_age, compound, is_out_lap):
-    df_sub = df[(df['Driver'] == driver_code) & (df['CircuitId'] == circuit_code)].sort_values('LapNumber')
-    prev_lap_delta = df_sub[df_sub['LapNumber'] < lap_number]['LapDelta'].iloc[-1] if not df_sub.empty and lap_number > 1 else 0
-    rolling_avg_lap = df_sub['RollingAvgLap'].mean() if not df_sub.empty else 0
-    lap_diff_from_rolling = lap_number - rolling_avg_lap
-    tyre_eff = tyre_age * df_sub['DegradationRate'].mean() if not df_sub.empty else 0
-    lap_age_factor = lap_number / (tyre_age + 1)
-    return pd.DataFrame([{
+def compute_features_for_input(df_ref, driver_code, circuit_code, lap_number, tyre_age, compound, is_out_lap):
+    df_sub = df_ref[(df_ref['Driver'] == driver_code) & (df_ref['CircuitId'] == circuit_code)].sort_values('LapNumber')
+    prev_lap_delta = df_sub[df_sub['LapNumber'] < lap_number]['LapDelta'].iloc[-1] if (not df_sub.empty and lap_number > 1) else 0.0
+    rolling_avg_lap = df_sub['RollingAvgLap'].mean() if not df_sub.empty else 0.0
+    degr = df_sub['DegradationRate'].mean() if not df_sub.empty else 0.0
+    return {
         'LapNumber': lap_number,
         'RollingAvgLap': rolling_avg_lap,
         'TyreAge': tyre_age,
-        'DegradationRate': df_sub['DegradationRate'].mean() if not df_sub.empty else 0,
-        'LapDiffFromRollingAvg': lap_diff_from_rolling,
-        'TyreEff': tyre_eff,
-        'LapAgeFactor': lap_age_factor,
+        'DegradationRate': degr,
+        'LapDiffFromRollingAvg': lap_number - rolling_avg_lap,
+        'TyreEff': tyre_age * degr,
+        'LapAgeFactor': lap_number / (tyre_age + 1),
         'PrevLapDelta': prev_lap_delta,
         'Driver': driver_code,
         'CircuitId': circuit_code,
         'IsOutLap': is_out_lap,
         'Compound': compound
-    }])
+    }
 
-X_input = compute_features(laps_df, driver_code, circuit_code, lap_number, tyre_age, compound, is_out_lap)
-for col in feature_info['CAT_COLS']:
-    if col in X_input.columns:
-        X_input[col] = pd.Categorical(X_input[col], categories=X_input[col].unique())
-
-preds = [model.predict(X_input)[0] for model in models]
-lap_delta_pred = np.mean(preds) / 10
-
-# ------------------- Predizione evidenziata
-color_pred = "green" if lap_delta_pred < 0 else "red"
-st.markdown(f"## 🏁 Predizione LapDelta: **<span style='color:{color_pred}'>{lap_delta_pred:.3f} s</span>**", unsafe_allow_html=True)
-st.info("Il LapDelta indica di quanto il giro stimato è più veloce (verde) o più lento (rosso) rispetto al giro medio del pilota.")
-
-# ------------------- Preparazione dati storici
-@st.cache_data(show_spinner=False)
-def prepare_test_data(driver_code, circuit_code, cat_cols):
-    df = laps_df[(laps_df['Driver'] == driver_code) & (laps_df['CircuitId'] == circuit_code)].copy()
-    if df.empty:
-        return df
-    df = df.sort_values('LapNumber')
-    df['PrevLapDelta'] = df['LapDelta'].shift(1).fillna(0)
-    rolling_avg = df['RollingAvgLap'].mean()
-    df['LapDiffFromRollingAvg'] = df['LapNumber'] - rolling_avg
-    df['TyreEff'] = df['TyreAge'] * df['DegradationRate']
-    df['LapAgeFactor'] = df['LapNumber'] / (df['TyreAge'] + 1)
-    for col in cat_cols:
-        if col in df.columns:
-            if pd.api.types.is_categorical_dtype(df[col]):
-                if "N/A" not in df[col].cat.categories:
-                    df[col] = df[col].cat.add_categories("N/A")
-            df[col] = df[col].fillna("N/A")
-            df[col] = pd.Categorical(df[col], categories=df[col].unique())
+def ensure_categorical(df: pd.DataFrame, cat_cols):
+    from pandas.api.types import CategoricalDtype
+    for c in cat_cols:
+        if c in df.columns and not isinstance(df[c].dtype, CategoricalDtype):
+            df[c] = df[c].astype('category')
     return df
 
-test_data = prepare_test_data(driver_code, circuit_code, feature_info['CAT_COLS'])
+# ----------------------------- LOAD ASSETS
+feature_info, models = load_latest_model()
+laps_df = load_laps()
 
-# ------------------- Metriche e confronto con storico
+if feature_info is None or not models:
+    st.error("Modelli non trovati in data/models. Esegui prima lo script di training.")
+    st.stop()
+
+if laps_df.empty:
+    st.error("laps_clean_final.parquet non trovato o vuoto.")
+    st.stop()
+
+# ----------------------------- SIDEBAR
+st.sidebar.header("⚙️ Configura il giro")
+presenter_mode = st.sidebar.toggle("Modalità Presentazione", value=False)
+drivers = sorted(laps_df['Driver'].unique())
+circuits = sorted(laps_df['name'].unique())
+compounds = sorted(laps_df['Compound'].unique())
+
+driver_name = st.sidebar.selectbox("Pilota", drivers)
+circuit_name = st.sidebar.selectbox("Circuito", circuits)
+lap_number = st.sidebar.slider("Numero giro", 1, 80, 1)
+tyre_age = st.sidebar.slider("Età pneumatico (giri)", 0, 50, 0)
+compound = st.sidebar.selectbox("Mescola", compounds)
+is_out_lap = st.sidebar.checkbox("Out Lap", value=False)
+
+if presenter_mode:
+    st.markdown("<style>section[data-testid='stSidebar']{display:none}</style>", unsafe_allow_html=True)
+
+# ----------------------------- PREDIZIONE
+driver_code = driver_name
+circuit_code = laps_df[laps_df['name'] == circuit_name]['CircuitId'].iloc[0]
+
+X_input_dict = compute_features_for_input(laps_df, driver_code, circuit_code, lap_number, tyre_age, compound, is_out_lap)
+X_input = pd.DataFrame([X_input_dict])
+X_input = ensure_categorical(X_input, feature_info.get('CAT_COLS', []))
+pred_scaled = ensemble_predict(models, X_input)[0]
+lap_delta_pred = float(pred_scaled) / 10.0
+
+# ----------------------------- METRICHE SUPERIORI
+latest = list_model_folders(models_dir)[0]
+colA, colB, colC = st.columns(3)
+colA.metric("Boosters", len(models))
+colB.metric("Folds", feature_info.get("n_folds", "N/A"))
+colC.metric("Modello", latest.name)
+
+# ----------------------------- RISULTATO PRINCIPALE
+color = "#00FF6A" if lap_delta_pred < 0 else "#FF4C4C"
+sign = "più veloce" if lap_delta_pred < 0 else "più lento"
+st.markdown(f"""
+<div style='background:#111; padding:16px; border-radius:12px; text-align:center'>
+<h2 style='color:{color}; margin:0'>{lap_delta_pred:.3f} s</h2>
+<div style='color:#bbb'>Rispetto al giro medio del pilota ({sign})</div>
+</div>
+""", unsafe_allow_html=True)
+
+# ----------------------------- INSIGHT
+with st.expander("📈 Insight sulla previsione", expanded=True):
+    if lap_delta_pred < 0:
+        st.success("🟢 Giro previsto più veloce della media — ottimo rendimento gomme e setup!")
+    elif lap_delta_pred < 0.1:
+        st.info("⚪ Giro in linea con la media del pilota — prestazione stabile.")
+    else:
+        st.warning("🔴 Giro più lento — possibile degrado gomme o traffico in pista.")
+
+# ----------------------------- GRAFICO
+test_data = laps_df[(laps_df['Driver'] == driver_code) & (laps_df['CircuitId'] == circuit_code)].copy()
 if not test_data.empty:
-    X_test_df = test_data[['LapNumber','RollingAvgLap','TyreAge','DegradationRate',
-                           'LapDiffFromRollingAvg','TyreEff','LapAgeFactor',
-                           'PrevLapDelta','Driver','CircuitId','IsOutLap','Compound']]
-    y_test = test_data['LapDelta'].values
-    preds_test = np.mean([m.predict(X_test_df) for m in models], axis=0) / 10
-    errors = y_test - preds_test
+    test_data = test_data.sort_values('LapNumber')
+    test_data['PrevLapDelta'] = test_data['LapDelta'].shift(1).fillna(0)
+    test_data['LapDiffFromRollingAvg'] = test_data['LapNumber'] - test_data['RollingAvgLap'].mean()
+    test_data['TyreEff'] = test_data['TyreAge'] * test_data['DegradationRate']
+    test_data['LapAgeFactor'] = test_data['LapNumber'] / (test_data['TyreAge'] + 1)
+    X_test_df = test_data[['LapNumber','RollingAvgLap','TyreAge','DegradationRate','LapDiffFromRollingAvg','TyreEff','LapAgeFactor','PrevLapDelta','Driver','CircuitId','IsOutLap','Compound']].copy()
 
-    # Metriche
-    mae = mean_absolute_error(y_test, preds_test)
-    rmse = np.sqrt(mean_squared_error(y_test, preds_test))
-    r2 = r2_score(y_test, preds_test)
-    medae = median_absolute_error(y_test, preds_test)
-    non_zero_mask = y_test != 0
-    mape = (np.abs(errors[non_zero_mask] / y_test[non_zero_mask]).mean()) * 100 if non_zero_mask.any() else np.nan
+    cat_cols = feature_info.get("CAT_COLS", [])
+    for c in cat_cols:
+        if c in X_test_df.columns:
+            X_test_df[c] = X_test_df[c].astype("category")
 
-    st.markdown("### 🎯 Metriche di Accuratezza")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("MAE", f"{mae:.3f} s")
-    col2.metric("RMSE", f"{rmse:.3f} s")
-    col3.metric("R²", f"{r2:.3f}")
-    col4.metric("MedAE", f"{medae:.3f} s")
-    col5.metric("MAPE", f"{mape:.2f} %")
-
-    # Grafico lineplot storico senza tooltip
-    test_data_plot = test_data.copy()
-    test_data_plot['Predizione'] = np.nan
-    test_data_plot.loc[test_data_plot['LapNumber'] == lap_number, 'Predizione'] = lap_delta_pred
-    colors = np.where(test_data_plot['LapDelta'] <= 0, 'green', 'red')
-
-    fig_line = go.Figure()
-
-    # Storico
-    fig_line.add_trace(go.Scatter(
-        x=test_data_plot['LapNumber'],
-        y=test_data_plot['LapDelta'],
-        mode='lines+markers',
-        marker=dict(color=colors, size=8),
-        line=dict(color='white', width=2),
-        name='Storico',
-        hoverinfo='skip'  # tooltip disabilitati
-    ))
-
-    # Predizione
-    fig_line.add_trace(go.Scatter(
-        x=[lap_number],
-        y=[lap_delta_pred],
-        mode='markers+text',
-        marker=dict(color=color_pred, size=14, symbol='star'),
-        name='Predizione',
-        text=["Predizione"],
-        textposition="top center",
-        hoverinfo='skip'
-    ))
-
-    fig_line.update_layout(
-        template='plotly_dark',
-        title="LapDelta Storico con Predizione Evidenziata",
-        xaxis_title="Numero Giro",
-        yaxis_title="LapDelta (s)"
-    )
-
-    st.plotly_chart(fig_line, use_container_width=True)
-
+    test_data["Predicted"] = ensemble_predict(models, X_test_df) / 10.0
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=test_data['LapNumber'], y=test_data['LapDelta'], mode='lines+markers', name='Storico'))
+    fig.add_trace(go.Scatter(x=test_data['LapNumber'], y=test_data['Predicted'], mode='lines+markers', name='Predetto'))
+    fig.add_shape(type="line", x0=lap_number, x1=lap_number, y0=min(test_data['LapDelta']), y1=max(test_data['LapDelta']),
+                  line=dict(color="red", width=2, dash="dash"))
+    fig.update_layout(template='plotly_dark', height=420, xaxis_title='Numero Giro', yaxis_title='LapDelta (s)')
+    st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info("❌ Nessun giro storico disponibile per questo pilota/circuito.")
+    st.info("Nessuno storico disponibile per questo pilota/circuito.")
+
+# ----------------------------- FOOTER
+st.markdown("""
+<hr style="border:1px solid #333">
+<div style='text-align:center; color:#777'>
+🏁 <b>F1 LapDelta Predictor</b> — powered by LightGBM · Streamlit Pro UI<br>
+<small>Data-driven performance analysis for race engineering</small>
+</div>
+""", unsafe_allow_html=True)
