@@ -207,31 +207,65 @@ def display_shap_tab(explainer, X_input):
     else:
         st.error("SHAP explainer non disponibile.")
 
+# =================================================================================
+# TAB TELEMETRIA COMPARATIVA OTTIMIZZATO
+# =================================================================================
+@st.cache_data
+def get_driver_data(laps_df, driver_name, circuit_id):
+    """Restituisce i dati di un pilota per un circuito, cached per performance."""
+    return laps_df[(laps_df['Driver'] == driver_name) & (laps_df['CircuitId'] == circuit_id)]
+
+def downsample_data(df, max_points=200):
+    """Riduce il numero di punti da plottare per migliorare le performance."""
+    if len(df) > max_points:
+        step = len(df) // max_points
+        return df.iloc[::step]
+    return df
+
 def display_telemetry_tab(laps_df, drivers, circuit_id):
-    """Visualizza il tab della telemetria comparativa usando dati pre-calcolati."""
+    """Visualizza il tab della telemetria comparativa ottimizzato."""
     st.subheader("Confronto Telemetrico tra Piloti")
-    st.info(f"Analisi comparativa del passo gara predetto sullo stesso circuito.")
+    st.info("Analisi comparativa del passo gara predetto sullo stesso circuito.")
+
     colA, colB = st.columns(2)
     driverA_name = colA.selectbox("Pilota A", drivers, key="drvA", index=drivers.index('VER') if 'VER' in drivers else 0)
     driverB_name = colB.selectbox("Pilota B", drivers, key="drvB", index=drivers.index('LEC') if 'LEC' in drivers else 1)
 
-    dataA = laps_df[(laps_df['Driver'] == driverA_name) & (laps_df['CircuitId'] == circuit_id)]
-    dataB = laps_df[(laps_df['Driver'] == driverB_name) & (laps_df['CircuitId'] == circuit_id)]
+    dataA = get_driver_data(laps_df, driverA_name, circuit_id)
+    dataB = get_driver_data(laps_df, driverB_name, circuit_id)
 
     if not dataA.empty and not dataB.empty:
-        merged = pd.merge(dataA[['LapNumber', 'PredictedDelta']], dataB[['LapNumber', 'PredictedDelta']], on='LapNumber', suffixes=('_A', '_B'))
+        # Downsample automatico per velocizzare il plot
+        dataA = downsample_data(dataA)
+        dataB = downsample_data(dataB)
+
+        merged = pd.merge(
+            dataA[['LapNumber', 'PredictedDelta']],
+            dataB[['LapNumber', 'PredictedDelta']],
+            on='LapNumber', suffixes=('_A', '_B')
+        )
         merged['DeltaPace'] = merged['PredictedDelta_B'] - merged['PredictedDelta_A']
 
+        # --- Line plot predizioni ---
         fig_tlm = go.Figure()
-        fig_tlm.add_trace(go.Scatter(x=merged["LapNumber"], y=merged["PredictedDelta_A"], mode="lines", name=f"{driverA_name} Pred.", line=dict(color="#00ff88")))
-        fig_tlm.add_trace(go.Scatter(x=merged["LapNumber"], y=merged["PredictedDelta_B"], mode="lines", name=f"{driverB_name} Pred.", line=dict(color="#ff4c4c")))
-        fig_tlm.update_layout(template="plotly_dark", height=420, title=f"Confronto Passo Gara Predetto — {driverA_name} vs {driverB_name}", xaxis_title="Numero Giro", yaxis_title="LapDelta Predetto (s)")
+        fig_tlm.add_trace(go.Scatter(x=merged["LapNumber"], y=merged["PredictedDelta_A"],
+                                     mode="lines", name=f"{driverA_name} Pred.", line=dict(color="#00ff88")))
+        fig_tlm.add_trace(go.Scatter(x=merged["LapNumber"], y=merged["PredictedDelta_B"],
+                                     mode="lines", name=f"{driverB_name} Pred.", line=dict(color="#ff4c4c")))
+        fig_tlm.update_layout(template="plotly_dark", height=420,
+                              title=f"Confronto Passo Gara Predetto — {driverA_name} vs {driverB_name}",
+                              xaxis_title="Numero Giro", yaxis_title="LapDelta Predetto (s)")
         st.plotly_chart(fig_tlm, use_container_width=True)
 
+        # --- Delta pace bar plot ---
         fig_delta = go.Figure()
-        fig_delta.add_trace(go.Bar(x=merged["LapNumber"], y=merged["DeltaPace"], marker_color=np.where(merged["DeltaPace"] < 0, "#00ff88", "#ff4c4c")))
-        fig_delta.update_layout(template="plotly_dark", height=250, title=f"Δ Passo Gara ({driverB_name} vs {driverA_name})", xaxis_title="Numero Giro", yaxis_title="Differenza (s)")
+        fig_delta.add_trace(go.Bar(x=merged["LapNumber"], y=merged["DeltaPace"],
+                                   marker_color=np.where(merged["DeltaPace"] < 0, "#00ff88", "#ff4c4c")))
+        fig_delta.update_layout(template="plotly_dark", height=250,
+                                title=f"Δ Passo Gara ({driverB_name} vs {driverA_name})",
+                                xaxis_title="Numero Giro", yaxis_title="Differenza (s)")
         st.plotly_chart(fig_delta, use_container_width=True)
+
     else:
         st.warning("Dati insufficienti per uno o entrambi i piloti per il confronto.")
 
