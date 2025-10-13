@@ -123,6 +123,7 @@ def main():
 
     metrics = []
     models = []
+    feature_importances = pd.DataFrame(index=X.columns)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     model_folder = models_dir / timestamp
@@ -161,32 +162,40 @@ def main():
         rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
         r2 = r2_score(y_val, y_pred_val)
 
-        metrics.append((mae, rmse, r2))
+        metrics.append({'fold': fold + 1, 'mae': mae/10, 'rmse': rmse/10, 'r2': r2})
+        feature_importances[f'fold_{fold+1}'] = model.feature_importances_
+
         logger.info(f"Fold {fold+1} - MAE: {mae/10:.3f} sec | RMSE: {rmse/10:.3f} sec | R²: {r2:.3f}")
 
     # ------------------------- Media metriche
-    mae_mean = np.mean([m[0] for m in metrics])
-    rmse_mean = np.mean([m[1] for m in metrics])
-    r2_mean = np.mean([m[2] for m in metrics])
+    mae_mean = np.mean([m['mae'] for m in metrics])
+    rmse_mean = np.mean([m['rmse'] for m in metrics])
+    r2_mean = np.mean([m['r2'] for m in metrics])
 
     logger.info("\nMetriche medie su 3 fold:")
-    logger.info(f"MAE: {mae_mean/10:.3f} sec")
-    logger.info(f"RMSE: {rmse_mean/10:.3f} sec")
+    logger.info(f"MAE: {mae_mean:.3f} sec")
+    logger.info(f"RMSE: {rmse_mean:.3f} sec")
     logger.info(f"R²: {r2_mean:.3f}")
 
     # 🔹 Debug per verificare stabilità MAE
     logger.info("Controllo stabilità MAE (run ripetibili):")
-    for i, (mae, _, _) in enumerate(metrics):
-        logger.info(f"Fold {i+1} MAE (scaled): {mae:.5f}")
+    for m in metrics:
+        logger.info(f"Fold {m['fold']} MAE (scaled): {m['mae']*10:.5f}")
 
     # ------------------------- Salvataggio info
     feature_info = {
+        "ALL_COLS": NUM_COLS + CAT_COLS,
         "NUM_COLS": NUM_COLS,
         "CAT_COLS": CAT_COLS,
         "TARGET": TARGET,
         "TARGET_SCALED": TARGET_SCALED,
         "n_folds": 3,
-        "model_paths": [str(model_folder / f"lgb_model_fold{i}.txt") for i in range(3)]
+        "model_paths": [str(model_folder / f"lgb_model_fold{i}.txt") for i in range(3)],
+        "categories": {c: X[c].cat.categories.tolist() for c in CAT_COLS},
+        "train_date": datetime.datetime.now().strftime("%Y-%m-%d"),
+        "model_type": "LightGBM Ensemble",
+        "feature_importance": feature_importances.mean(axis=1).to_dict(),
+        "cv_results": metrics
     }
     joblib.dump(feature_info, model_folder / "feature_info.joblib")
 
