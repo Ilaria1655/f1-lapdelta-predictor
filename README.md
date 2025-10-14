@@ -1,126 +1,132 @@
-# 🏎️ F1 LapDelta Predictor 2024
+# 🏎️ F1 LapDelta Predictor — Engineering Suite
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B-blue)](https://www.python.org/)
-[![LightGBM](https://img.shields.io/badge/LightGBM-Boosting-success)](https://lightgbm.readthedocs.io/)
-[![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-red)](https://streamlit.io/)
-[![Optuna](https://img.shields.io/badge/Optuna-HPO-orange)](https://optuna.org/)
-![Accuracy](https://img.shields.io/badge/R²≈1.0-brightgreen)
-![Dataset Size](https://img.shields.io/badge/Dataset->50k%20laps-lightgrey)
+> **Predizione e analisi avanzata delle performance in Formula 1** con modelli *LightGBM*, analisi *SHAP* e visualizzazioni interattive in tempo reale.
 
----
-
-## 📌 Overview
-
-Questo progetto introduce un **modello predittivo per il LapDelta in Formula 1**, costruito con **LightGBM** e integrato in una **dashboard interattiva Streamlit**.
-Il sistema è in grado di prevedere con estrema precisione la differenza di tempo per giro (`LapDelta`) a partire da feature tecniche e contestuali, rendendolo uno strumento utile per analisi strategiche e simulazioni.
-
-La pipeline completa combina:
-
-* **Feature engineering avanzata** (indicatori di degrado gomma, rolling average, fattori età giro, ecc.)
-* **Validazione rigorosa con GroupKFold** (pilota + circuito)
-* **Ottimizzazione iperparametri con Optuna**
-* **Dashboard user-friendly** per interazioni in tempo reale
+![Streamlit](https://img.shields.io/badge/Built%20with-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
+![LightGBM](https://img.shields.io/badge/Model-LightGBM-00B300?logo=lightgbm&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green)
+![Status](https://img.shields.io/badge/Status-Active-success)
 
 ---
 
-## ⚙️ Architettura del Progetto
+## 🧩 Cos’è
 
-```
+**F1 LapDelta Predictor — Engineering Suite** è una piattaforma interattiva per **analizzare, predire e visualizzare il *Lap Delta*** (cioè la differenza di tempo tra giri) nelle gare di Formula 1.  
+Combina **machine learning**, **feature engineering** e **telemetria comparativa** per fornire insight ingegneristici sul passo gara dei piloti.
+
+L’applicazione include:
+- 🚀 **Predizione live del Lap Delta** basata su modelli LightGBM multi-fold  
+- 📊 **Dashboard interattiva Streamlit** con analisi storiche e telemetria comparativa  
+- 🧠 **Interpretabilità con SHAP** per capire il contributo di ogni feature  
+- ⚙️ **Suite completa di preprocessing e training script** per gestire l’intero ciclo ML  
+
+---
+
+## 🧱 Architettura del Progetto
+
+f1-lapdelta-predictor/
+│
 ├── data/
-│   ├── raw/                # Dataset raw (.csv)
-│   ├── processed/          # Dataset pulito (.parquet)
-│   └── models/             # Modelli addestrati e validazione salvata
+│ ├── processed/
+│ │ ├── laps_clean_final.parquet
+│ │ ├── laps_with_predictions.parquet
+│ └── models/
+│ └── <timestamped_model_folder>/
+│ ├── model.txt
+│ ├── feature_info.joblib
+│ └── ...
+│
 ├── src/
-│   ├── data_prep.py        # Raccolta dati da *.csv
-│   ├── features.py         # Feature engeneering
-│   ├── clean_features.py   # Pulizia dataset
-│   ├── model_utils.py      # Supporto salvataggio modelli
-│   ├── train_model.py      # Training, feature engineering, salvataggio modelli
-│   └── app.py              # Dashboard Streamlit per predizione e visualizzazione
-├── README.md
+│ ├── app.py # App Streamlit principale
+│ ├── features.py # Generazione feature da dati grezzi
+│ ├── train_model.py # Addestramento modelli LightGBM
+│ ├── run_post_processing.py # Post-elaborazione predizioni
+│ └── clean_features.py # Pulizia e normalizzazione dati
+│
 ├── requirements.txt
-```
+└── README.md
+
+
+## ⚙️ Setup & Installazione
+
+### 1️⃣ Clona il repository
+git clone https://github.com/Ilaria1655/f1-lapdelta-predictor
+cd f1-lapdelta-predictor
+
+### 2️⃣ Crea l’ambiente virtuale e installa le dipendenze
+python -m venv .venv
+source .venv/bin/activate   # su macOS/Linux
+.venv\Scripts\activate      # su Windows
+pip install -r requirements.txt
+
+### 3️⃣ Prepara i dati
+Assicurati di avere i dati pre-elaborati nella cartella `data/processed/`.  
+Se non li hai, esegui in ordine:
+python src/clean_features.py
+python src/train_model.py
+python src/run_post_processing.py
+NB: I dataset originali sono stati scaricati da Kaggle, e sono necessari per il funzionamento dell'app.
+
+### 4️⃣ Avvia l’applicazione Streamlit
+streamlit run app.py
 
 ---
 
-## 🧩 Feature Principali
+## 🧠 Principali Funzionalità
 
-* **Input dinamico**: selezione pilota, circuito, giro, mescola, età pneumatico
-* **Predizione LapDelta in tempo reale** con media su più fold del modello
-* **Metriche reali di validazione** mostrate nella dashboard (MAE, RMSE, R²)
-* **Confronto storico** con performance medie passate dello stesso pilota
-* **Visualizzazioni interattive** con Plotly (bar chart, boxplot, distribuzioni)
+Funzione: 🏎️ Predizione Lap Delta  
+Descrizione: Calcola in tempo reale la variazione di performance per pilota/circuito  
 
----
+Funzione: 📈 Analisi Storica  
+Descrizione: Visualizza il confronto tra dati reali e predetti per ogni sessione  
 
-## 🔬 Modello Predittivo
+Funzione: 🧮 SHAP Insights  
+Descrizione: Mostra il contributo di ogni feature nella predizione  
 
-* **Algoritmo**: LightGBM Regressor
-* **Validazione**: GroupKFold (3 fold, raggruppati per pilota + circuito)
-* **Iperparametri**: ottimizzati con Optuna (25 trial, early stopping)
-* **Target**: `LapDelta` (scalato ×10 per stabilità numerica durante il training)
-* **Feature derivate principali**:
+Funzione: 📡 Telemetria Comparativa  
+Descrizione: Confronta il passo gara tra due piloti sullo stesso circuito  
 
-  * `LapDiffFromRollingAvg`
-  * `TyreEff` (età gomma × degradazione)
-  * `LapAgeFactor`
-  * `PrevLapDelta`
+Funzione: 🛠️ Model Analytics  
+Descrizione: Mostra importanza feature, cross-validation e dettagli di training
 
 ---
 
-## 📊 Metriche (su fold di validazione)
+## 🧩 Stack Tecnologico
 
-| Metric | Mean (3 fold) |
-| ------ | ------------- |
-| MAE    | ~0.02 s       |
-| RMSE   | ~0.03 s       |
-| R²     | ≈ 1.00        |
-
----
-
-## 🎛️ Dashboard Streamlit
-
-La dashboard è stata sviluppata per **analizzare, confrontare e predire** in modo immediato.
-
-### 🚀 Demo (GIF)
----
-
-## 📥 Installazione & Utilizzo
-
-1. **Clona la repo**
-
-   ```bash
-   git clone https://github.com/Ilaria1655/simulator_4th_try.git
-   ```
-
-2. **Crea l’ambiente**
-
-   ```bash
-   conda create -n f1predictor python=3.9 -y
-   conda activate f1predictor
-   pip install -r requirements.txt
-   ```
-
-3. **Avvia il training**
-
-   ```bash
-   python src/train_model.py
-   ```
-
-4. **Lancia la dashboard**
-
-   ```bash
-   streamlit run src/app.py
-   ```
+- Python 3.10+  
+- LightGBM — Modello di machine learning principale  
+- Streamlit — Interfaccia web interattiva  
+- Plotly — Visualizzazioni dinamiche e grafiche  
+- SHAP — Explainability delle predizioni  
+- Pandas / NumPy / Scikit-learn — Analisi e preprocessing dati
 
 ---
 
-## 📖 Riferimenti
+## 🧪 Esempio di utilizzo
 
-* [LightGBM Documentation](https://lightgbm.readthedocs.io/)
-* [Optuna HPO](https://optuna.org/)
-* [Streamlit](https://streamlit.io/)
-* Dataset Formula 1 rielaborato da telemetria/lap data ufficiale (pre-elaborato in `laps_clean_final.parquet`)
+Una volta avviata l’app:  
+Seleziona il pilota, il circuito e i parametri gomma nella sidebar.  
+Ottieni la predizione del Lap Delta con confidenza e insight SHAP.  
+
+Esplora i tab:  
+- Analisi Storica → confronto tra giri reali e previsti  
+- SHAP → contributo delle feature alla singola predizione  
+- Telemetria Comparativa → confronto tra due piloti  
+- Dettagli Modello → performance, importanza e metadati del training
 
 ---
 
+## 📊 Esempi di Visualizzazione
+
+Analisi Storica | SHAP Waterfall | Telemetria Comparativa  
+![Example1](https://github.com/user-attachments/assets/placeholder1) | ![Example2](https://github.com/user-attachments/assets/placeholder2) | ![Example3](https://github.com/user-attachments/assets/placeholder3)  
+
+
+---
+
+
+## 👨‍💻 Autore
+
+F1 LapDelta Predictor — Engineering Suite  
+Realizzato con ❤️ da Ilaria Fantasia
