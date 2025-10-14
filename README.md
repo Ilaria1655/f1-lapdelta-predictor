@@ -25,28 +25,30 @@ L’applicazione include:
 
 ## 🧱 Architettura del Progetto
 
+```text
 f1-lapdelta-predictor/
 │
 ├── data/
-│ ├── processed/
-│ │ ├── laps_clean_final.parquet
-│ │ ├── laps_with_predictions.parquet
-│ └── models/
-│ └── <timestamped_model_folder>/
-│ ├── model.txt
-│ ├── feature_info.joblib
-│ └── ...
+│   ├── processed/
+│   │   ├── laps_clean_final.parquet
+│   │   ├── laps_with_predictions.parquet
+│   └── models/
+│       └── <timestamped_model_folder>/
+│           ├── model.txt
+│           ├── feature_info.joblib
+│           └── ...
 │
 ├── src/
-│ ├── app.py # App Streamlit principale
-│ ├── features.py # Generazione feature da dati grezzi
-│ ├── train_model.py # Addestramento modelli LightGBM
-│ ├── run_post_processing.py # Post-elaborazione predizioni
-│ └── clean_features.py # Pulizia e normalizzazione dati
+│   ├── app.py                  # App Streamlit principale
+│   ├── features.py             # Generazione feature da dati grezzi
+│   ├── train_model.py          # Addestramento modelli LightGBM
+│   ├── run_post_processing.py  # Post-elaborazione predizioni
+│   └── clean_features.py       # Pulizia e normalizzazione dati
 │
 ├── requirements.txt
 └── README.md
 
+```
 
 ## ⚙️ Setup & Installazione
 
@@ -117,13 +119,6 @@ Esplora i tab:
 
 ---
 
-## 📊 Esempi di Visualizzazione
-
-Analisi Storica | SHAP Waterfall | Telemetria Comparativa  
-![Example1](https://github.com/user-attachments/assets/placeholder1) | ![Example2](https://github.com/user-attachments/assets/placeholder2) | ![Example3](https://github.com/user-attachments/assets/placeholder3)  
-
-
----
 
 
 ## 👨‍💻 Autore
